@@ -68,7 +68,6 @@ def _configure_dspy_if_possible() -> Optional[object]:
 
             predictor = dspy.Predict(Reply)
 
-        
             class _PredictWrapper:
                 def predict(self, instruction: str, context: str) -> str:
                     out = predictor(instruction=instruction, context=context)
