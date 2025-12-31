@@ -1,5 +1,6 @@
 # --- Textual UI -------------------------------------------------------------
 import textwrap
+from rich.markdown import Markdown
 from textual.app import App, ComposeResult
 from textual.reactive import reactive
 from textual.widgets import Header, Footer, TextArea, RichLog, Static
@@ -7,7 +8,7 @@ from workspace import MemoryWorkspace
 from orchestrator import Orchestrator
 from datatypes import Message, Role
 import rss
-from fetcher import extract_urls, fetch_url_content
+from handlers import handle_add
 
 class Hint(Static):
     DEFAULT_CSS = """
@@ -23,9 +24,10 @@ class MemoryApp(App):
     """
 
     BINDINGS = [
-        ("ctrl+c", "quit", "Quit"),
+        ("ctrl+q", "quit", "Quit"),
         ("ctrl+l", "clear_log", "Clear log"),
         ("ctrl+s", "submit_input", "Send"),  # Handle Ctrl+S at app level
+        ("ctrl+v", "paste_input", "Paste"),
     ]
 
     show_help = reactive(False)
@@ -60,6 +62,14 @@ class MemoryApp(App):
     def action_clear_log(self) -> None:
         self.log_view.clear()
 
+    def action_paste_input(self) -> None:
+        """Paste from clipboard into the input box."""
+        try:
+            self.input.paste()
+        except Exception:
+            # Ignore if clipboard not available
+            pass
+
     def _handle_input(self, text: str) -> None:
         """Process input text"""
         if not text.strip():
@@ -79,9 +89,9 @@ class MemoryApp(App):
         # make the display prettier and handle multiple messages
         if isinstance(reply, list):
             for r in reply:
-                self.log_view.write(f"assistant> {r.content} {f'[{r.reference_time.isoformat()}]' if r.reference_time else ''}  ")
+                self._write_assistant(r.content, reference=r.reference_time)
         else:
-                self.log_view.write(f"assistant> {reply}")
+            self._write_assistant(str(reply))
 
     async def _handle_command(self, cmdline: str) -> None:
         parts = cmdline.split(maxsplit=1)
@@ -107,7 +117,9 @@ class MemoryApp(App):
             if not arg:
                 self.log_view.write("usage: /add <text>")
                 return
-            await self._handle_add(arg)
+            logs = handle_add(arg, self.ws, self.orch)
+            for line in logs:
+                self.log_view.write(line)
             return
 
         if cmd == "/recall":
@@ -132,7 +144,11 @@ class MemoryApp(App):
 
         if cmd == "/summarize":
             summary = self.orch.summarize()
-            self.log_view.write(summary)
+            if isinstance(summary, list):
+                for m in summary:
+                    self._write_assistant(m.content)
+            else:
+                self._write_assistant(str(summary))
             return
 
         if cmd == "/clear":
@@ -145,66 +161,6 @@ class MemoryApp(App):
             return
 
         self.log_view.write(f"[warn] unknown command: {cmd}")
-
-    async def _handle_add(self, arg: str) -> None:
-        tokens = arg.split()
-        mode = None
-        if tokens and tokens[0].lower() in ("fetch", "refs"):
-            mode = tokens[0].lower()
-            arg = " ".join(tokens[1:])
-        urls = extract_urls(arg)
-        note_text = arg.strip()
-
-        if urls:
-            if len(urls) > 1 and mode != "fetch":
-                # default to references only to avoid heavy fetch; user can re-run with fetch
-                self._store_note_and_refs(note_text, urls, refs_only=True)
-                self.log_view.write("[add] multiple URLs detected; saved note + references. Re-run with '/add fetch ...' to fetch contents.")
-                return
-
-            if mode == "refs":
-                self._store_note_and_refs(note_text, urls, refs_only=True)
-                self.log_view.write("[add] saved note + references (no fetch).")
-                return
-
-            # fetch content for URLs
-            fetched = 0
-            note_msg = Message(content=note_text, role=Role.USER, metadata={"urls": urls, "note_type": "user_note"})
-            self.ws.add(note_msg)
-            for url in urls:
-                title, content = fetch_url_content(url)
-                if not content:
-                    self.log_view.write(f"[add] fetch failed for {url}; saved note only.")
-                    continue
-                msg = Message(
-                    content=content,
-                    role=Role.SYSTEM,
-                    metadata={"url": url, "title": title, "source": "url_fetch"},
-                )
-                self.ws.add_with_document(
-                    [msg],
-                    document_meta={
-                        "doc_type": "web_page",
-                        "title": title,
-                        "source": "url",
-                        "uri": url,
-                        "tags": {"url": url, "note_present": bool(note_text)},
-                    },
-                )
-                fetched += 1
-            self.log_view.write(f"[ok] saved note and fetched {fetched}/{len(urls)} URL(s).")
-            return
-
-        # no URLs: regular add via timechunker
-        m = self.orch.timechunker(text=arg, role_hint="user")
-        self.log_view.write("[ok] added to memory")
-
-    def _store_note_and_refs(self, note_text: str, urls: list, refs_only: bool = False) -> None:
-        metadata = {"urls": urls, "note_type": "user_note"}
-        if refs_only:
-            metadata["archive_mode"] = "refs_only"
-        msg = Message(content=note_text, role=Role.USER, metadata=metadata)
-        self.ws.add(msg)
 
     async def _run_rss(self) -> None:
         feeds = rss.load_feed_urls()
@@ -223,4 +179,12 @@ class MemoryApp(App):
         keywords = ["AI infra", "LLM", "AI coding", "Agent", "Agentic AI", "machine learning", "attention", "memory"]
         summary = self.orch.summarize_rss(items, keywords=keywords)
         for msg in summary:
-            self.log_view.write(f"assistant> {msg.content}")
+            self._write_assistant(msg.content)
+
+    def _write_assistant(self, content: str, reference=None) -> None:
+        """Render assistant output as Markdown when possible."""
+        suffix = f" [{reference.isoformat()}]" if reference else ""
+        try:
+            self.log_view.write(Markdown(f"{content}{suffix}"))
+        except Exception:
+            self.log_view.write(f"assistant> {content}{suffix}")

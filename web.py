@@ -1,0 +1,179 @@
+from datetime import datetime
+from typing import List
+
+from fastapi import Body, FastAPI
+from fastapi.responses import HTMLResponse
+
+from datatypes import Message
+from handlers import handle_add
+from orchestrator import Orchestrator
+from workspace import MemoryWorkspace
+import rss
+
+app = FastAPI(title="Shiye Web")
+
+workspace = MemoryWorkspace()
+orchestrator = Orchestrator(workspace)
+
+
+def msg_to_dict(m: Message) -> dict:
+    return {
+        "content": m.content,
+        "role": m.role.value,
+        "created_at": m.created_at.isoformat(),
+        "reference_time": m.reference_time.isoformat() if m.reference_time else None,
+        "metadata": m.metadata,
+    }
+
+
+@app.get("/", response_class=HTMLResponse)
+def index() -> HTMLResponse:
+    html = """
+    <!doctype html>
+    <html>
+    <head>
+        <meta charset="utf-8" />
+        <title>Shiye</title>
+        <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+        <style>
+            body { font-family: system-ui, sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
+            header { padding: 12px 16px; background: #1e293b; display: flex; justify-content: space-between; align-items: center; }
+            #log { padding: 16px; height: 70vh; overflow-y: auto; background: #0b1220; }
+            .msg { margin-bottom: 12px; }
+            .role { font-size: 12px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.04em; }
+            .bubble { padding: 10px 12px; border-radius: 8px; background: #111827; border: 1px solid #1f2937; }
+            .me .bubble { background: #1d4ed8; border-color: #1e40af; color: #e2e8f0; }
+            form { padding: 12px 16px; background: #111827; display: grid; gap: 8px; }
+            textarea { width: 100%; min-height: 80px; resize: vertical; border-radius: 8px; border: 1px solid #1f2937; background: #0f172a; color: #e2e8f0; padding: 8px; }
+            button { border: none; border-radius: 8px; padding: 10px 14px; cursor: pointer; font-weight: 600; color: #0b1220; background: #38bdf8; }
+            button.secondary { background: #22c55e; }
+            button.ghost { background: #1f2937; color: #e2e8f0; border: 1px solid #334155; }
+            .row { display: flex; gap: 8px; align-items: center; }
+        </style>
+    </head>
+    <body>
+        <header>
+            <div><strong>Shiye</strong> — Web UI</div>
+            <div class="row">
+                <button class="ghost" onclick="runRss()">Run RSS</button>
+            </div>
+        </header>
+        <div id="log"></div>
+        <form onsubmit="event.preventDefault(); sendChat();">
+            <textarea id="input" placeholder="Type a message... (/add to archive, /rss to summarize feeds)"></textarea>
+            <div class="row">
+                <button type="submit">Send</button>
+                <button type="button" class="secondary" onclick="sendAdd()">Add (/add)</button>
+                <button type="button" class="ghost" onclick="loadHistory()">Refresh History</button>
+            </div>
+        </form>
+        <script>
+            const logEl = document.getElementById('log');
+            const inputEl = document.getElementById('input');
+
+            function renderMessage(role, content) {
+                const wrap = document.createElement('div');
+                wrap.className = 'msg ' + (role === 'user' ? 'me' : '');
+                const roleEl = document.createElement('div');
+                roleEl.className = 'role';
+                roleEl.textContent = role;
+                const bubble = document.createElement('div');
+                bubble.className = 'bubble';
+                bubble.innerHTML = marked.parse(content || '');
+                wrap.appendChild(roleEl);
+                wrap.appendChild(bubble);
+                logEl.appendChild(wrap);
+                logEl.scrollTop = logEl.scrollHeight;
+            }
+
+            async function sendChat() {
+                const text = inputEl.value.trim();
+                if (!text) return;
+                renderMessage('you', text);
+                inputEl.value = '';
+                const res = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ text })
+                });
+                const data = await res.json();
+                (data.messages || []).forEach(m => renderMessage(m.role, m.content));
+            }
+
+            async function sendAdd() {
+                const text = inputEl.value.trim();
+                if (!text) return;
+                inputEl.value = '';
+                const res = await fetch('/api/add', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ text })
+                });
+                const data = await res.json();
+                (data.logs || []).forEach(line => renderMessage('system', line));
+            }
+
+            async function runRss() {
+                const res = await fetch('/api/rss', { method: 'POST' });
+                const data = await res.json();
+                (data.messages || []).forEach(m => renderMessage(m.role, m.content));
+            }
+
+            async function loadHistory() {
+                const res = await fetch('/api/messages?limit=50');
+                const data = await res.json();
+                logEl.innerHTML = '';
+                (data.messages || []).forEach(m => renderMessage(m.role, m.content));
+            }
+
+            loadHistory();
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html)
+
+
+@app.get("/api/messages")
+def get_messages(limit: int = 50) -> dict:
+    msgs: List[Message] = workspace.list_recent(limit)
+    return {"messages": [msg_to_dict(m) for m in msgs]}
+
+
+@app.post("/api/chat")
+def chat(payload=Body(...)) -> dict:
+    text = (payload or {}).get("text", "")
+    if not text:
+        return {"messages": []}
+    reply = orchestrator.timelinereply(text)
+    if isinstance(reply, list):
+        messages = [msg_to_dict(m) for m in reply]
+    else:
+        messages = [{"content": str(reply), "role": "assistant"}]
+    return {"messages": messages}
+
+
+@app.post("/api/add")
+def add(payload=Body(...)) -> dict:
+    text = (payload or {}).get("text", "")
+    if not text:
+        return {"logs": ["[add] missing text"]}
+    logs = handle_add(text, workspace, orchestrator)
+    return {"logs": logs}
+
+
+@app.post("/api/rss")
+def run_rss() -> dict:
+    feeds = rss.load_feed_urls()
+    if not feeds:
+        return {"messages": [{"content": "[rss] no feeds configured (rss_feeds.txt)", "role": "system"}]}
+    try:
+        items = rss.fetch_all(feeds, per_feed_limit=3, total_limit=20)
+    except Exception as e:
+        return {"messages": [{"content": f"[rss] fetch failed: {e}", "role": "system"}]}
+    if not items:
+        return {"messages": [{"content": "[rss] no items found.", "role": "system"}]}
+    keywords = ["AI infra", "LLM", "AI coding", "Agent", "Agentic AI", "machine learning", "attention", "memory"]
+    summary = orchestrator.summarize_rss(items, keywords=keywords)
+    messages = [msg_to_dict(m) for m in summary]
+    return {"messages": messages}

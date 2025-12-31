@@ -34,6 +34,11 @@ Testing:
 - Activate your env (e.g., `source ~/.virtualenvs/dspytest/bin/activate`) and run `python -m pytest -q`.
 - Tests use temp data dirs; the real files appear after you run the app or write to the store (default `~/.shiye/shiye.db` and `~/.shiye/shiye.faiss`).
 
+Web UI (optional):
+
+- Run the web server: `uvicorn web:app --reload --port 8000` and open `http://localhost:8000`.
+- Chat, run `/rss`, and add notes/URLs from the browser; messages render as Markdown.
+
 RSS brief (micro-app):
 
 - Configure feeds in `rss_feeds.txt` (one URL per line). Defaults include Google Research, OpenAI, DeepMind, Microsoft Research.
