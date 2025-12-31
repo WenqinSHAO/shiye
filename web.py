@@ -1,11 +1,10 @@
-from datetime import datetime
 from typing import List
 
 from fastapi import Body, FastAPI
 from fastapi.responses import HTMLResponse
 from datetime import UTC, datetime
 
-from datatypes import Message
+from datatypes import Message, ensure_utc
 from handlers import handle_add
 from orchestrator import Orchestrator
 from workspace import MemoryWorkspace
@@ -21,8 +20,8 @@ def msg_to_dict(m: Message) -> dict:
     return {
         "content": m.content,
         "role": m.role.value,
-        "created_at": m.created_at.isoformat(),
-        "reference_time": m.reference_time.isoformat() if m.reference_time else None,
+        "created_at": ensure_utc(m.created_at).isoformat(),
+        "reference_time": ensure_utc(m.reference_time).isoformat() if m.reference_time else None,
         "metadata": m.metadata,
         "chunk_id": m.metadata.get("chunk_id"),
     }
@@ -48,43 +47,66 @@ def index() -> HTMLResponse:
         <title>Shiye</title>
         <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
         <style>
-            body { font-family: system-ui, sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
-            header { padding: 12px 16px; background: #1e293b; display: flex; justify-content: space-between; align-items: center; }
-            #log { padding: 16px; height: 70vh; overflow-y: auto; background: #0b1220; }
-            .msg { margin-bottom: 12px; position: relative; }
-            .role { font-size: 12px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.04em; }
-            .bubble { padding: 10px 12px; border-radius: 8px; background: #111827; border: 1px solid #1f2937; }
-            .me .bubble { background: #1d4ed8; border-color: #1e40af; color: #e2e8f0; }
-            .msg .actions { position: absolute; right: 4px; top: 4px; display: none; gap: 4px; }
-            .msg:hover .actions { display: inline-flex; }
-            .actions button { font-size: 11px; padding: 4px 6px; border-radius: 6px; border: 1px solid #334155; background: #1f2937; color: #e2e8f0; cursor: pointer; }
-            form { padding: 12px 16px; background: #111827; display: grid; gap: 8px; }
-            textarea { width: 100%; min-height: 80px; resize: vertical; border-radius: 8px; border: 1px solid #1f2937; background: #0f172a; color: #e2e8f0; padding: 8px; }
-            button { border: none; border-radius: 8px; padding: 10px 14px; cursor: pointer; font-weight: 600; color: #0b1220; background: #38bdf8; }
-            button.secondary { background: #22c55e; }
-            button.ghost { background: #1f2937; color: #e2e8f0; border: 1px solid #334155; }
+            :root {
+                --bg: #f6f8fb;
+                --panel: #ffffff;
+                --ink: #1f2933;
+                --subtle: #62738a;
+                --border: #d7deea;
+                --accent: #5b8def;
+                --accent-soft: #e8efff;
+                --assistant: #e8f5e9;
+                --assistant-border: #cfead4;
+                --user: #e7f1ff;
+                --user-border: #c8dcff;
+                --system: #fff7e6;
+                --system-border: #f4e3b5;
+                --action-bg: #edf1f7;
+                --action-border: #cfd7e2;
+            }
+            body { font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif; margin: 0; background: var(--bg); color: var(--ink); }
+            header { padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 10; }
+            #log { padding: 16px; height: 70vh; overflow-y: auto; background: linear-gradient(180deg, #fafdff 0%, var(--bg) 100%); }
+            .msg { margin-bottom: 12px; position: relative; padding-right: 90px; }
+            .role { font-size: 12px; color: var(--subtle); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }
+            .bubble { padding: 12px 14px; border-radius: 12px; background: var(--panel); border: 1px solid var(--border); box-shadow: 0 2px 8px rgba(15, 23, 42, 0.05); }
+            .role-user .bubble { background: var(--user); border-color: var(--user-border); }
+            .role-assistant .bubble { background: var(--assistant); border-color: var(--assistant-border); }
+            .role-system .bubble { background: var(--system); border-color: var(--system-border); }
+            .msg .actions { position: absolute; right: 8px; top: 12px; display: inline-flex; gap: 6px; opacity: 0; transition: opacity 0.15s ease; }
+            .msg:hover .actions { opacity: 1; }
+            .actions button { font-size: 11px; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--action-border); background: var(--action-bg); color: var(--ink); cursor: pointer; }
+            .actions button:disabled { opacity: 0.4; cursor: not-allowed; }
+            form { padding: 12px 16px; background: var(--panel); border-top: 1px solid var(--border); display: grid; gap: 8px; }
+            textarea { width: 100%; min-height: 90px; resize: vertical; border-radius: 10px; border: 1px solid var(--border); background: #fff; color: var(--ink); padding: 10px; }
+            button { border: none; border-radius: 10px; padding: 10px 14px; cursor: pointer; font-weight: 600; color: #fff; background: var(--accent); box-shadow: 0 2px 6px rgba(91, 141, 239, 0.35); }
+            button.secondary { background: #5fc49e; box-shadow: 0 2px 6px rgba(95, 196, 158, 0.35); }
+            button.ghost { background: var(--panel); color: var(--ink); border: 1px solid var(--border); box-shadow: none; }
             .row { display: flex; gap: 8px; align-items: center; }
+            .debug-only { display: none; }
+            body.debug-mode .debug-only { display: block; }
+            details.debug-block { margin-top: 8px; border: 1px dashed var(--border); border-radius: 8px; background: #f9fbff; }
+            details.debug-block summary { padding: 8px 10px; cursor: pointer; color: var(--subtle); font-size: 12px; }
+            details.debug-block pre { margin: 0; padding: 8px 10px 10px; font-size: 12px; background: transparent; color: #0f172a; overflow-x: auto; }
         </style>
     </head>
     <body>
         <header>
             <div><strong>Shiye</strong> — Web UI</div>
             <div class="row">
-                <label style="display:flex;align-items:center;gap:6px;color:#cbd5e1;font-size:12px;">
+                <label style="display:flex;align-items:center;gap:6px;color:#4b5563;font-size:12px;">
                     <input type="checkbox" id="debugToggle" onclick="toggleDebug()" />
                     debug
                 </label>
-                <button class="ghost" onclick="runRss()">Run RSS</button>
                 <button class="ghost" onclick="loadTrace()">LLM Trace</button>
             </div>
         </header>
         <div id="log"></div>
-        <div id="trace" style="padding:8px 16px; font-size:12px; color:#94a3b8; display:none;"></div>
+        <div id="trace" style="padding:8px 16px; font-size:12px; color:#4b5563; display:none;"></div>
         <form onsubmit="event.preventDefault(); sendChat();">
-            <textarea id="input" placeholder="Type a message... (/add to archive, /rss to summarize feeds)"></textarea>
+            <textarea id="input" placeholder="Type a message... (slash commands supported)"></textarea>
             <div class="row">
                 <button type="submit">Send</button>
-                <button type="button" class="secondary" onclick="sendAdd()">Add (/add)</button>
                 <button type="button" class="ghost" onclick="loadHistory()">List history</button>
             </div>
         </form>
@@ -94,9 +116,9 @@ def index() -> HTMLResponse:
             const debugToggle = document.getElementById('debugToggle');
             const traceEl = document.getElementById('trace');
 
-            function renderMessage(role, content, chunkId, createdAt, debug) {
+            function renderMessage(role, content, chunkId, createdAt, debug, metadata) {
                 const wrap = document.createElement('div');
-                wrap.className = 'msg ' + (role === 'user' ? 'me' : '');
+                wrap.className = 'msg role-' + (role || 'system');
                 if (chunkId) wrap.dataset.chunkId = chunkId;
                 const roleEl = document.createElement('div');
                 roleEl.className = 'role';
@@ -107,38 +129,43 @@ def index() -> HTMLResponse:
                 bubble.innerHTML = marked.parse(content || '');
                 const actions = document.createElement('div');
                 actions.className = 'actions';
-                if (chunkId) {
-                    const del = document.createElement('button');
-                    del.textContent = '✕';
-                    del.title = 'Delete';
-                    del.onclick = () => deleteMessage(chunkId, wrap);
-                    actions.appendChild(del);
-                }
+                const del = document.createElement('button');
+                del.textContent = '✕';
+                del.title = chunkId ? 'Delete' : 'Delete unavailable';
+                del.disabled = !chunkId;
+                del.onclick = () => chunkId && deleteMessage(chunkId, wrap);
+                actions.appendChild(del);
                 const copyBtn = document.createElement('button');
                 copyBtn.textContent = 'Copy';
                 copyBtn.onclick = () => copyMessage(content);
                 actions.appendChild(copyBtn);
-                if (debug) {
-                    const dbg = document.createElement('pre');
-                    dbg.style.fontSize = '11px';
-                    dbg.style.background = '#0f172a';
-                    dbg.style.border = '1px solid #1f2937';
-                    dbg.style.padding = '6px';
-                    dbg.style.marginTop = '6px';
-                    dbg.textContent = JSON.stringify(debug, null, 2);
-                    bubble.appendChild(dbg);
+                if (role !== 'user') {
+                    const sections = [];
+                    if (metadata && Object.keys(metadata).length) {
+                        sections.push({ label: metadata.source ? `Trace: ${metadata.source}` : 'Trace: metadata', payload: metadata });
+                    }
+                    if (debug) {
+                        const label = debug.kind ? `Trace: ${debug.kind}` : 'Trace: debug';
+                        sections.push({ label, payload: debug });
+                    }
+                    sections.forEach(sec => {
+                        const details = document.createElement('details');
+                        details.className = 'debug-block';
+                        details.classList.add('debug-only');
+                        const summary = document.createElement('summary');
+                        summary.textContent = sec.label;
+                        const pre = document.createElement('pre');
+                        pre.textContent = JSON.stringify(sec.payload, null, 2);
+                        details.appendChild(summary);
+                        details.appendChild(pre);
+                        bubble.appendChild(details);
+                    });
                 }
                 wrap.appendChild(actions);
                 wrap.appendChild(roleEl);
                 wrap.appendChild(bubble);
                 logEl.appendChild(wrap);
                 logEl.scrollTop = logEl.scrollHeight;
-            }
-
-            async function loadTrace() {
-                const res = await fetch('/api/llm_trace');
-                const data = await res.json();
-                document.getElementById('trace').textContent = JSON.stringify(data.trace || {}, null, 2);
             }
 
             async function copyMessage(text) {
@@ -159,41 +186,22 @@ def index() -> HTMLResponse:
             async function sendChat() {
                 const text = inputEl.value.trim();
                 if (!text) return;
-                renderMessage('you', text, null, new Date().toISOString());
+                renderMessage('user', text, null, new Date().toISOString());
                 inputEl.value = '';
                 const res = await fetch('/api/chat', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ text })
+                    body: JSON.stringify({ text, debug: debugToggle.checked })
                 });
                 const data = await res.json();
-                (data.messages || []).forEach(m => renderMessage(m.role, m.content, m.chunk_id, m.created_at));
-            }
-
-            async function sendAdd() {
-                const text = inputEl.value.trim();
-                if (!text) return;
-                inputEl.value = '';
-                const res = await fetch('/api/add', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ text })
-                });
-                const data = await res.json();
-                (data.logs || []).forEach(line => renderMessage('system', line, null, new Date().toISOString()));
-            }
-
-            async function runRss() {
-                const res = await fetch('/api/rss', { method: 'POST' });
-                const data = await res.json();
-                (data.messages || []).forEach(m => renderMessage(m.role, m.content, m.chunk_id, m.created_at));
+                (data.messages || []).forEach(m => renderMessage(m.role, m.content, m.chunk_id, m.created_at, m.debug, m.metadata));
             }
 
             async function loadHistory() {
                 const res = await fetch('/api/messages?limit=50');
                 const data = await res.json();
                 logEl.innerHTML = '';
-                (data.messages || []).forEach(m => renderMessage(m.role, m.content, m.chunk_id, m.created_at));
+                (data.messages || []).forEach(m => renderMessage(m.role, m.content, m.chunk_id, m.created_at, m.debug, m.metadata));
             }
 
             async function loadTrace() {
@@ -203,7 +211,9 @@ def index() -> HTMLResponse:
             }
 
             function toggleDebug() {
-                traceEl.style.display = debugToggle.checked ? 'block' : 'none';
+                const on = debugToggle.checked;
+                document.body.classList.toggle('debug-mode', on);
+                traceEl.style.display = on ? 'block' : 'none';
             }
         </script>
     </body>

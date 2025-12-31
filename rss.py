@@ -17,12 +17,15 @@ def _parse_datetime(dt_str: Optional[str]) -> Optional[datetime]:
     if not dt_str:
         return None
     try:
-        return datetime.fromisoformat(dt_str)
+        dt = datetime.fromisoformat(dt_str)
     except Exception:
         try:
-            return datetime.strptime(dt_str, "%a, %d %b %Y %H:%M:%S %Z")
+            dt = datetime.strptime(dt_str, "%a, %d %b %Y %H:%M:%S %Z")
         except Exception:
             return None
+    if dt and dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def fetch_feed(url: str, per_feed_limit: int = 3) -> List[Dict]:

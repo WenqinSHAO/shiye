@@ -9,7 +9,7 @@ from typing import List, Optional, Sequence
 import numpy as np
 
 from config import DATA_DIR, DB_PATH
-from datatypes import Message, Role
+from datatypes import Message, Role, ensure_utc
 from embeddings import EmbeddingProvider
 from vector_store import FaissIndex, faiss
 
@@ -157,13 +157,20 @@ class LocalStore:
         return Message(
             content=row["text"],
             role=Role(row["role"]) if row["role"] else Role.USER,
-            created_at=datetime.fromisoformat(row["created_at"]),
-            reference_time=datetime.fromisoformat(row["event_at"]) if row["event_at"] else None,
+            created_at=ensure_utc(datetime.fromisoformat(row["created_at"])) if row["created_at"] else datetime.now(UTC),
+            reference_time=ensure_utc(datetime.fromisoformat(row["event_at"])) if row["event_at"] else None,
             metadata=metadata,
         )
 
     def _insert_document(self, doc_meta: dict) -> int:
-        now = datetime.now(UTC).isoformat()
+        def _iso(dt_val: Optional[datetime]) -> Optional[str]:
+            if dt_val is None:
+                return None
+            if isinstance(dt_val, str):
+                return dt_val
+            return ensure_utc(dt_val).isoformat()
+
+        now = datetime.now(UTC)
         with self._connect() as conn:
             cur = conn.cursor()
             cur.execute(
@@ -175,9 +182,9 @@ class LocalStore:
                     doc_meta.get("source"),
                     doc_meta.get("uri"),
                     doc_meta.get("doc_type"),
-                    doc_meta.get("created_at", now),
-                    doc_meta.get("event_at"),
-                    doc_meta.get("ingested_at", now),
+                    _iso(doc_meta.get("created_at", now)),
+                    _iso(doc_meta.get("event_at")),
+                    _iso(doc_meta.get("ingested_at", now)),
                     doc_meta.get("title"),
                     json.dumps(doc_meta.get("tags")) if doc_meta.get("tags") else None,
                     doc_meta.get("sensitivity"),
@@ -206,7 +213,7 @@ class LocalStore:
                 print(f"[warn] failed to insert document, falling back to default: {e}")
         with self._connect() as conn:
             cur = conn.cursor()
-            now = datetime.now(UTC).isoformat()
+            now_iso = datetime.now(UTC).isoformat()
             for idx, msg in enumerate(messages):
                 embedding_id = None
                 if embeddings is not None:
@@ -223,8 +230,8 @@ class LocalStore:
                         msg.role.value,
                         None,
                         None,
-                        msg.created_at.isoformat(),
-                        msg.reference_time.isoformat() if msg.reference_time else None,
+                        ensure_utc(msg.created_at).isoformat(),
+                        ensure_utc(msg.reference_time).isoformat() if msg.reference_time else None,
                         json.dumps(msg.metadata) if msg.metadata else None,
                         msg.metadata.get("focus_hint") if msg.metadata else None,
                     ),
@@ -257,7 +264,7 @@ class LocalStore:
                         "flat",
                         1 if (faiss and self._faiss_index) else 0,
                         str(self._faiss_index.index_path) if self._faiss_index else None,
-                        now,
+                        now_iso,
                     ),
                 )
         return ids

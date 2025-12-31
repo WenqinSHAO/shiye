@@ -1,8 +1,17 @@
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, UTC
 from enum import Enum
 from typing import Optional, Dict, Any
 import json
+
+
+def ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """Return a timezone-aware UTC datetime (or None)."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt
 
 class Role(Enum):
     USER = "user"
@@ -13,17 +22,22 @@ class Role(Enum):
 class Message:
     content: str
     role: Role
-    created_at: datetime = field(default_factory=datetime.now)
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     reference_time: Optional[datetime] = None
     metadata: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.created_at = ensure_utc(self.created_at) or datetime.now(UTC)
+        if self.reference_time is not None:
+            self.reference_time = ensure_utc(self.reference_time)
 
     def to_dict(self) -> dict:
         """Convert message to dictionary format"""
         return {
             "content": self.content,
             "role": self.role.value,
-            "created_at": self.created_at.isoformat(),
-            "reference_time": self.reference_time.isoformat() if self.reference_time else None,
+            "created_at": ensure_utc(self.created_at).isoformat(),
+            "reference_time": ensure_utc(self.reference_time).isoformat() if self.reference_time else None,
             "metadata": self.metadata
         }
 
@@ -42,8 +56,8 @@ class Message:
         return cls(
             content=data["content"],
             role=Role(data["role"]),
-            created_at=datetime.fromisoformat(data["created_at"]),
-            reference_time=datetime.fromisoformat(data["reference_time"]) if data.get("reference_time") else None,
+            created_at=ensure_utc(datetime.fromisoformat(data["created_at"])) if data.get("created_at") else None,
+            reference_time=ensure_utc(datetime.fromisoformat(data["reference_time"])) if data.get("reference_time") else None,
             metadata=data.get("metadata", {})
             )
     
