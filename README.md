@@ -23,17 +23,44 @@ What it does:
 - enhanced timeline processing
 - multiple copy input input box
 
+Storage/embeddings (v0):
+
+- Local SQLite + FAISS live under `~/.shiye` by default (override with `SHIYE_DATA_DIR`).
+- Default embedding model: `sentence-transformers/all-MiniLM-L6-v2` (override with `SHIYE_EMBED_MODEL`); download once while online.
+- Requires `faiss-cpu` and `sentence-transformers` from `requirements.txt`.
+
+Testing:
+
+- Activate your env (e.g., `source ~/.virtualenvs/dspytest/bin/activate`) and run `python -m pytest -q`.
+- Tests use temp data dirs; the real files appear after you run the app or write to the store (default `~/.shiye/shiye.db` and `~/.shiye/shiye.faiss`).
+
+Planning/roadmap: see `TODO.md` for the working plan and open questions.
+
 ## End Goal
 
 Functions-wise, what's most important to me, for my personal uses:
 
-- a personal off-brain data scope: such that I may pile up my readings, messages, thoughts here
-- auto & dynamic organization / structurization / focusing for on going discussion, logged exchanges, or data
-  - i.e. my input or exchange to the tool is linear as if I have an infitie long context
-  - yet, the info processing capabilitiy of LLM should organize things and distill insights as we go
-- proactively suggest actions
+- a personal off-brain data bank storing raw original date, and strucutrized ones easier for LLM investigation
+  - web, wechat readings
+  - acamdeic papers, pdfs
+  - books, epub, mobi
+  - mails
+  - etc.
+- a mostly chat based assistant inferace that
+  - makes add-hoc tools/mini app from test instructions, tool execution via LLM API or scripts
+  - maintains the personal off-brain data banks, knows what are my current focus topics, what out stall archives
+  - updates the off-brain data banks with meaningful exchanges with the assistant
+  - is sessionless facing the user, yet user may still explicit ask to start afresh or telling the focus topic as of now
+  - make good use of the off-brain data banks in interactions, yet may also makes searches or call other tools to help along with the quest
+  - may use different LLM backend eventual
+  - proactively suggestion actions at fitting moment
 
-## Next bady steps
+## achitectural considerations
+
+TBD, main components, what to build first
+
+
+## Next bady steps (outdated)
 
 - [x]: refactor the mvp in a more modular layout
 - scope on certain in-context logs by semantic, time cues

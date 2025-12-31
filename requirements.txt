@@ -31,6 +31,7 @@ docker==7.1.0
 dotenv==0.9.9
 dspy==3.0.2
 durationpy==0.10
+faiss-cpu==1.9.0
 fastapi==0.116.1
 filelock==3.19.1
 Flask==3.1.2
@@ -127,8 +128,10 @@ requests-oauthlib==2.0.0
 rich==14.1.0
 rpds-py==0.27.0
 rsa==4.9.1
+pytest==8.3.4
 scikit-learn==1.7.1
 scipy==1.16.1
+sentence-transformers==3.4.1
 shellingham==1.5.4
 six==1.17.0
 smmap==5.0.2
