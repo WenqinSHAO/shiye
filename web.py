@@ -172,16 +172,7 @@ def index() -> HTMLResponse:
     </head>
     <body>
         <header>
-            <div style="display:flex;flex-direction:column;gap:4px;">
-                <div><strong>Shiye</strong> — Your personal knowledge base</div>
-                <div class="command-strip">
-                    <span class="command-pill">/note</span>
-                    <span class="command-pill">/add</span>
-                    <span class="command-pill">/rss</span>
-                    <span class="command-pill">/summarize</span>
-                    <span class="command-pill">/clear (UI only)</span>
-                </div>
-            </div>
+            <div><strong>Shiye</strong> — Your personal knowledge base</div>
             <div class="row">
                 <label style="display:flex;align-items:center;gap:6px;color:#4b5563;font-size:12px;">
                     <input type="checkbox" id="debugToggle" onclick="toggleDebug()" />
@@ -198,8 +189,15 @@ def index() -> HTMLResponse:
                     <div class="input-wrap">
                         <textarea id="input" placeholder="Type a message... (slash commands supported)"></textarea>
                         <div class="input-footer">
-                            <span id="sendStatus">Ctrl+Enter to send</span>
+                            <div class="command-strip">
+                                <span class="command-pill">/note</span>
+                                <span class="command-pill">/add</span>
+                                <span class="command-pill">/rss</span>
+                                <span class="command-pill">/summarize</span>
+                                <span class="command-pill">/clear</span>
+                            </div>
                             <div style="flex:1;"></div>
+                            <span id="sendStatus">Ctrl+Enter to send</span>
                             <button id="sendBtn" type="submit">Send</button>
                         </div>
                     </div>
