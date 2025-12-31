@@ -83,19 +83,20 @@ def fetch_feed(url: str, per_feed_limit: int = 3) -> List[Dict]:
     return items[:per_feed_limit]
 
 
-def fetch_all(feeds: Iterable[str], per_feed_limit: int = 3, total_limit: int = 20) -> List[Dict]:
+def fetch_all(feeds: Iterable[str], per_feed_limit: int = 3, total_limit: int = 20, exclude_hashes: Optional[set] = None) -> List[Dict]:
     """Fetch items from multiple RSS feeds with deduplication.
     
     Args:
         feeds: Iterable of feed URLs.
         per_feed_limit: Maximum items per feed (default: 3).
         total_limit: Maximum total items across all feeds (default: 20).
+        exclude_hashes: Set of item hashes to exclude (already processed items).
         
     Returns:
         Deduplicated list of feed items from all feeds, capped at total_limit.
     """
     all_items: List[Dict] = []
-    seen_hashes = set()
+    seen_hashes = exclude_hashes or set()
     for feed in feeds:
         for item in fetch_feed(feed, per_feed_limit=per_feed_limit):
             h = hashlib.md5(f"{item.get('title')}|{item.get('link')}".encode("utf-8")).hexdigest()

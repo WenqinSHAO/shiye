@@ -134,6 +134,20 @@ class LocalStore:
                 )
                 """
             )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS rss_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_hash TEXT UNIQUE NOT NULL,
+                    title TEXT,
+                    link TEXT,
+                    feed_url TEXT,
+                    published TEXT,
+                    fetched_at TEXT,
+                    processed INTEGER DEFAULT 0
+                )
+                """
+            )
 
     def _maybe_embed(self, texts: Sequence[str]):
         if self.embedder and self._faiss_index:
@@ -548,10 +562,47 @@ class LocalStore:
             try:
                 selector = faiss.IDSelectorBatch(np.array([chunk_id], dtype="int64"))
                 self._faiss_index.index.remove_ids(selector)
-                self._faiss_index.persist()
-            except Exception as e:
-                print(f"[warn] failed to remove from FAISS: {e}")
+            except Exception:
+                pass  # ignore FAISS removal errors
         return bool(changed)
+
+    def get_rss_item_hashes(self) -> set:
+        """Get all processed RSS item hashes."""
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT item_hash FROM rss_items WHERE processed = 1")
+            rows = cur.fetchall()
+        return {row["item_hash"] for row in rows}
+
+    def store_rss_items(self, items: List[dict]) -> None:
+        """Store RSS items with their hashes."""
+        if not items:
+            return
+        now_iso = datetime.now(UTC).isoformat()
+        with self._connect() as conn:
+            cur = conn.cursor()
+            for item in items:
+                import hashlib
+                h = hashlib.md5(f"{item.get('title')}|{item.get('link')}".encode("utf-8")).hexdigest()
+                try:
+                    cur.execute(
+                        """
+                        INSERT INTO rss_items (item_hash, title, link, feed_url, published, fetched_at, processed)
+                        VALUES (?, ?, ?, ?, ?, ?, 1)
+                        ON CONFLICT(item_hash) DO UPDATE SET processed = 1, fetched_at = ?
+                        """,
+                        (
+                            h,
+                            item.get("title"),
+                            item.get("link"),
+                            item.get("feed"),
+                            item.get("published").isoformat() if item.get("published") else None,
+                            now_iso,
+                            now_iso,
+                        ),
+                    )
+                except Exception as e:
+                    print(f"[warn] Failed to store RSS item hash: {e}")
 
     def clear(self) -> None:
         with self._connect() as conn:

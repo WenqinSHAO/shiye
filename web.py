@@ -632,6 +632,25 @@ def index() -> HTMLResponse:
                     setSending(false);
                     return;
                 }
+                if (text === '/rss') {
+                    inputEl.value = '';
+                    renderMessage('system', '[rss] fetching feeds...', null, new Date().toISOString());
+                    setSending(true);
+                    try {
+                        const res = await fetch('/api/rss', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'}
+                        });
+                        const data = await res.json();
+                        (data.messages || []).forEach(m => renderMessage(m.role, m.content, m.chunk_id, m.created_at, m.debug, m.metadata));
+                    } catch (e) {
+                        console.warn('rss failed', e);
+                    } finally {
+                        setSending(false);
+                        if (inputEl) inputEl.focus();
+                    }
+                    return;
+                }
                 renderMessage('user', text, null, new Date().toISOString());
                 inputEl.value = '';
                 setSending(true);
@@ -903,11 +922,19 @@ def run_rss() -> dict:
     if not feeds:
         return {"messages": [make_system_msg("[rss] no feeds configured (rss_feeds.txt)")] }
     try:
-        items = rss.fetch_all(feeds, per_feed_limit=3, total_limit=20)
+        # Get previously processed item hashes to exclude them
+        exclude_hashes = workspace.store.get_rss_item_hashes() if workspace.store else set()
+        items = rss.fetch_all(feeds, per_feed_limit=3, total_limit=20, exclude_hashes=exclude_hashes)
     except Exception as e:
         return {"messages": [make_system_msg(f"[rss] fetch failed: {e}")] }
     if not items:
-        return {"messages": [make_system_msg("[rss] no items found.")]}
+        return {"messages": [make_system_msg("[rss] no new items found.")]}
+    # Store the new items as processed
+    if workspace.store:
+        try:
+            workspace.store.store_rss_items(items)
+        except Exception as e:
+            print(f"[warn] Failed to store RSS items: {e}")
     keywords = ["AI infra", "LLM", "AI coding", "Agent", "Agentic AI", "machine learning", "attention", "memory"]
     summary = orchestrator.summarize_rss(items, keywords=keywords)
     messages = [msg_to_dict(m) for m in summary]
