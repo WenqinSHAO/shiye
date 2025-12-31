@@ -61,3 +61,12 @@ Lean default: start with SQLite for metadata + FAISS for embeddings; wrap with a
 - Resilience:
   - On mismatch between FAISS ids and SQLite, rebuild index from `chunks` where `deleted=0`.
   - Version and snapshot the FAISS file alongside SQLite backups.
+
+## Micro-app: daily high-signal RSS brief (design)
+- Feeds config: `rss_feeds.txt` lists trusted feeds (low-frequency changes). Initial set: Google Research, OpenAI, DeepMind, MSR.
+- Command: `/rss` runs a daily brief on demand (later: scheduled). No auto pop-ups.
+- Selection: fetch latest items per feed, dedup by link/title hash, cap per feed (e.g., 3) and total (e.g., 20). Drop obvious promos/too-short posts if possible.
+- Summary: single LLM call to produce concise bullets with inline references (title + URL), aiming for low token use. Store the daily summary as a document (`doc_type=rss_daily_summary`, tags include feeds/date/item count/keywords).
+- Storage: keep item metadata (title, url, published_at, feed) alongside the summary for traceability; no per-article embeddings unless explicitly archived.
+- Archive later: `/add` could detect URLs and fetch content for archival; or provide an interactive prompt in `/rss` output to archive selected URLs (future).
+- Topics/keywords (bootstrap bias): AI infra, LLM, AI coding, Agent/Agentic AI, machine learning, attention, memory. Longer-term: derive from user persona/usage.

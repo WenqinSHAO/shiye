@@ -160,7 +160,32 @@ class LocalStore:
             metadata=json.loads(row["tags"]) if row["tags"] else {},
         )
 
-    def add_messages(self, messages: Sequence[Message]) -> List[int]:
+    def _insert_document(self, doc_meta: dict) -> int:
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO documents (source, uri, doc_type, created_at, event_at, ingested_at, title, tags, sensitivity, hash, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    doc_meta.get("source"),
+                    doc_meta.get("uri"),
+                    doc_meta.get("doc_type"),
+                    doc_meta.get("created_at", now),
+                    doc_meta.get("event_at"),
+                    doc_meta.get("ingested_at", now),
+                    doc_meta.get("title"),
+                    json.dumps(doc_meta.get("tags")) if doc_meta.get("tags") else None,
+                    doc_meta.get("sensitivity"),
+                    doc_meta.get("hash"),
+                    doc_meta.get("status"),
+                ),
+            )
+            return cur.lastrowid
+
+    def add_messages(self, messages: Sequence[Message], document_meta: Optional[dict] = None) -> List[int]:
         ids: List[int] = []
         if not messages:
             return ids
@@ -171,6 +196,12 @@ class LocalStore:
             except Exception as e:
                 print(f"[warn] embedding failed: {e}")
                 embeddings = None
+        doc_id = self.default_doc_id
+        if document_meta:
+            try:
+                doc_id = self._insert_document(document_meta)
+            except Exception as e:
+                print(f"[warn] failed to insert document, falling back to default: {e}")
         with self._connect() as conn:
             cur = conn.cursor()
             now = datetime.now(UTC).isoformat()
@@ -184,7 +215,7 @@ class LocalStore:
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        self.default_doc_id,
+                        doc_id,
                         idx,
                         msg.content,
                         msg.role.value,

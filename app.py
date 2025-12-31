@@ -5,6 +5,9 @@ from textual.reactive import reactive
 from textual.widgets import Header, Footer, TextArea, RichLog, Static
 from workspace import MemoryWorkspace
 from orchestrator import Orchestrator
+from datatypes import Message, Role
+import rss
+from fetcher import extract_urls, fetch_url_content
 
 class Hint(Static):
     DEFAULT_CSS = """
@@ -34,7 +37,7 @@ class MemoryApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        yield Hint("Commands: /help, /add, /recall, /list, /summarize, /clear — otherwise chat with the assistant.")
+        yield Hint("Commands: /help, /add, /recall, /list, /summarize, /clear, /rss — otherwise chat with the assistant.")
         self.log_view = RichLog(wrap=True, name="log")
         yield self.log_view
         yield Static("Type a message or /help … then press Ctrl+S to send", classes="input-hint")
@@ -95,6 +98,7 @@ class MemoryApp(App):
                   /list            Show the last 20 memory items
                   /summarize       Summarize current memory (DSPy if configured; else local)
                   /clear           Clear all memory
+                  /rss             Fetch configured RSS feeds and summarize
                 """
             ).strip())
             return
@@ -103,9 +107,7 @@ class MemoryApp(App):
             if not arg:
                 self.log_view.write("usage: /add <text>")
                 return
-            # no need to update the memory workspace here, as timechunker does it
-            m = self.orch.timechunker(text=arg, role_hint="user") 
-            self.log_view.write("[ok] added to memory")
+            await self._handle_add(arg)
             return
 
         if cmd == "/recall":
@@ -138,4 +140,87 @@ class MemoryApp(App):
             self.log_view.write("[ok] memory cleared")
             return
 
+        if cmd == "/rss":
+            await self._run_rss()
+            return
+
         self.log_view.write(f"[warn] unknown command: {cmd}")
+
+    async def _handle_add(self, arg: str) -> None:
+        tokens = arg.split()
+        mode = None
+        if tokens and tokens[0].lower() in ("fetch", "refs"):
+            mode = tokens[0].lower()
+            arg = " ".join(tokens[1:])
+        urls = extract_urls(arg)
+        note_text = arg.strip()
+
+        if urls:
+            if len(urls) > 1 and mode != "fetch":
+                # default to references only to avoid heavy fetch; user can re-run with fetch
+                self._store_note_and_refs(note_text, urls, refs_only=True)
+                self.log_view.write("[add] multiple URLs detected; saved note + references. Re-run with '/add fetch ...' to fetch contents.")
+                return
+
+            if mode == "refs":
+                self._store_note_and_refs(note_text, urls, refs_only=True)
+                self.log_view.write("[add] saved note + references (no fetch).")
+                return
+
+            # fetch content for URLs
+            fetched = 0
+            note_msg = Message(content=note_text, role=Role.USER, metadata={"urls": urls, "note_type": "user_note"})
+            self.ws.add(note_msg)
+            for url in urls:
+                title, content = fetch_url_content(url)
+                if not content:
+                    self.log_view.write(f"[add] fetch failed for {url}; saved note only.")
+                    continue
+                msg = Message(
+                    content=content,
+                    role=Role.SYSTEM,
+                    metadata={"url": url, "title": title, "source": "url_fetch"},
+                )
+                self.ws.add_with_document(
+                    [msg],
+                    document_meta={
+                        "doc_type": "web_page",
+                        "title": title,
+                        "source": "url",
+                        "uri": url,
+                        "tags": {"url": url, "note_present": bool(note_text)},
+                    },
+                )
+                fetched += 1
+            self.log_view.write(f"[ok] saved note and fetched {fetched}/{len(urls)} URL(s).")
+            return
+
+        # no URLs: regular add via timechunker
+        m = self.orch.timechunker(text=arg, role_hint="user")
+        self.log_view.write("[ok] added to memory")
+
+    def _store_note_and_refs(self, note_text: str, urls: list, refs_only: bool = False) -> None:
+        metadata = {"urls": urls, "note_type": "user_note"}
+        if refs_only:
+            metadata["archive_mode"] = "refs_only"
+        msg = Message(content=note_text, role=Role.USER, metadata=metadata)
+        self.ws.add(msg)
+
+    async def _run_rss(self) -> None:
+        feeds = rss.load_feed_urls()
+        if not feeds:
+            self.log_view.write("[rss] no feeds configured (rss_feeds.txt).")
+            return
+        self.log_view.write(f"[rss] fetching from {len(feeds)} feeds...")
+        try:
+            items = rss.fetch_all(feeds, per_feed_limit=3, total_limit=20)
+        except Exception as e:
+            self.log_view.write(f"[rss] fetch failed: {e}")
+            return
+        if not items:
+            self.log_view.write("[rss] no items found.")
+            return
+        keywords = ["AI infra", "LLM", "AI coding", "Agent", "Agentic AI", "machine learning", "attention", "memory"]
+        summary = self.orch.summarize_rss(items, keywords=keywords)
+        for msg in summary:
+            self.log_view.write(f"assistant> {msg.content}")

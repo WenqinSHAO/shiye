@@ -34,6 +34,11 @@ Testing:
 - Activate your env (e.g., `source ~/.virtualenvs/dspytest/bin/activate`) and run `python -m pytest -q`.
 - Tests use temp data dirs; the real files appear after you run the app or write to the store (default `~/.shiye/shiye.db` and `~/.shiye/shiye.faiss`).
 
+RSS brief (micro-app):
+
+- Configure feeds in `rss_feeds.txt` (one URL per line). Defaults include Google Research, OpenAI, DeepMind, Microsoft Research.
+- Run `/rss` in the app to fetch latest items, cap per feed, and generate a concise digest with references. The daily digest is stored as `doc_type=rss_daily_summary` in local storage.
+
 Planning/roadmap: see `TODO.md` for the working plan and open questions.
 
 ## End Goal

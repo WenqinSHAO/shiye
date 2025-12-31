@@ -128,3 +128,59 @@ class Orchestrator:
             content=f"[local] Summary not available {note}".strip(), 
             role=Role.ASSISTANT
         )]
+
+    def summarize_rss(self, items: List[dict], keywords: List[str]) -> List[Message]:
+        """Summarize RSS items; uses DSPy if available, else produces a simple digest."""
+        # Build prompt-ready text
+        content_lines = []
+        for i, item in enumerate(items, 1):
+            title = item.get("title") or "(no title)"
+            url = item.get("link") or ""
+            feed = item.get("feed") or ""
+            summary = item.get("summary", "")
+            content_lines.append(f"[{i}] {title}\nfeed: {feed}\nurl: {url}\nsummary: {summary}")
+        joined = "\n\n".join(content_lines)
+        if self.dspy_predictor:
+            try:
+                instruction = (
+                    "Create a concise daily brief of the following RSS items. "
+                    "Highlight what might interest the user. Include inline references with the title and URL. "
+                    f"Keywords to bias toward: {', '.join(keywords)}."
+                )
+                out = self.dspy_predictor(
+                    instruction=instruction,
+                    question=[],
+                    context=[Message(content=joined, role=Role.USER)],
+                )
+                for m in out.response:
+                    self.workspace.add_with_document(
+                        [m],
+                        document_meta={
+                            "doc_type": "rss_daily_summary",
+                            "title": "RSS daily brief",
+                            "source": "rss",
+                            "tags": {"keywords": keywords, "count": len(items)},
+                        },
+                    )
+                return out.response
+            except Exception as e:
+                return [Message(content=f"[local] RSS summary error: {e}", role=Role.ASSISTANT)]
+        # fallback digest
+        bullet_lines = []
+        for i, item in enumerate(items, 1):
+            title = item.get("title") or "(no title)"
+            url = item.get("link") or ""
+            feed = item.get("feed") or ""
+            bullet_lines.append(f"- [{i}] {title} ({feed}) {url}")
+        bullet_lines.append(f"\nKeywords: {', '.join(keywords)}")
+        msg = Message(content="\n".join(bullet_lines), role=Role.ASSISTANT)
+        self.workspace.add_with_document(
+            [msg],
+            document_meta={
+                "doc_type": "rss_daily_summary",
+                "title": "RSS daily brief",
+                "source": "rss",
+                "tags": {"keywords": keywords, "count": len(items)},
+            },
+        )
+        return [msg]

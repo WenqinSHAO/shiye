@@ -32,6 +32,14 @@ class MemoryWorkspace:
             overflow = len(self._fallback_items) - self.max_items
             del self._fallback_items[:overflow]
 
+    def add_with_document(self, messages: List[Message], document_meta: dict) -> None:
+        if self.store:
+            self.store.add_messages(messages, document_meta=document_meta)
+            return
+        # fallback: just add to memory
+        for m in messages:
+            self.add(m)
+
     def list_recent(self, n: int = 20) -> List[Message]:
         if self.store:
             return self.store.list_recent(n)
