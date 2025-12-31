@@ -152,12 +152,14 @@ class LocalStore:
             return cur.lastrowid
 
     def _row_to_message(self, row: sqlite3.Row) -> Message:
+        metadata = json.loads(row["tags"]) if row["tags"] else {}
+        metadata["chunk_id"] = row["id"]
         return Message(
             content=row["text"],
             role=Role(row["role"]) if row["role"] else Role.USER,
             created_at=datetime.fromisoformat(row["created_at"]),
             reference_time=datetime.fromisoformat(row["event_at"]) if row["event_at"] else None,
-            metadata=json.loads(row["tags"]) if row["tags"] else {},
+            metadata=metadata,
         )
 
     def _insert_document(self, doc_meta: dict) -> int:
@@ -322,6 +324,21 @@ class LocalStore:
             cur.execute("SELECT * FROM chunks WHERE id = ? AND deleted = 0", (chunk_id,))
             row = cur.fetchone()
         return self._row_to_message(row) if row else None
+
+    def delete_chunk(self, chunk_id: int) -> bool:
+        """Soft-delete a chunk and remove from FAISS if possible."""
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE chunks SET deleted = 1 WHERE id = ?", (chunk_id,))
+            changed = cur.rowcount
+        if changed and self._faiss_index:
+            try:
+                selector = faiss.IDSelectorBatch(np.array([chunk_id], dtype="int64"))
+                self._faiss_index.index.remove_ids(selector)
+                self._faiss_index.persist()
+            except Exception as e:
+                print(f"[warn] failed to remove from FAISS: {e}")
+        return bool(changed)
 
     def clear(self) -> None:
         with self._connect() as conn:

@@ -79,6 +79,7 @@ def test_ingest_and_recall_and_index_sync():
         hit = store.recall("bananas")
         assert hit is not None
         assert hit.content in {"ripe bananas taste good", "hello world"}
+        assert hit.metadata.get("chunk_id") is not None
 
 
 def test_clear_resets_chunks_and_index():
@@ -97,5 +98,17 @@ def test_clear_resets_chunks_and_index():
         conn.close()
         assert n_chunks == 0
 
+        idx = faiss.read_index(str(cfg.INDEX_PATH))
+        assert idx.ntotal == 0
+
+
+def test_delete_chunk_marks_deleted_and_removes_from_index():
+    with tempfile.TemporaryDirectory() as tmp:
+        store, Message, Role, cfg = make_store(tmp)
+        ids = store.add_messages([Message(content="one", role=Role.USER)])
+        chunk_id = ids[0]
+        assert store.recall("one")
+        assert store.delete_chunk(chunk_id)
+        assert store.recall("one") is None
         idx = faiss.read_index(str(cfg.INDEX_PATH))
         assert idx.ntotal == 0

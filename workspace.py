@@ -64,4 +64,14 @@ class MemoryWorkspace:
         if self.store:
             return self.store.context_block(n)
         return self._fallback_items[-n:]
+
+    def delete_chunk(self, chunk_id: int) -> bool:
+        if self.store:
+            return self.store.delete_chunk(chunk_id)
+        # fallback: delete by metadata if present
+        for idx, msg in enumerate(self._fallback_items):
+            if msg.metadata.get("chunk_id") == chunk_id:
+                del self._fallback_items[idx]
+                return True
+        return False
   

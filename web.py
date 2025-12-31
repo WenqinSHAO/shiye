@@ -23,6 +23,7 @@ def msg_to_dict(m: Message) -> dict:
         "created_at": m.created_at.isoformat(),
         "reference_time": m.reference_time.isoformat() if m.reference_time else None,
         "metadata": m.metadata,
+        "chunk_id": m.metadata.get("chunk_id"),
     }
 
 
@@ -39,10 +40,13 @@ def index() -> HTMLResponse:
             body { font-family: system-ui, sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
             header { padding: 12px 16px; background: #1e293b; display: flex; justify-content: space-between; align-items: center; }
             #log { padding: 16px; height: 70vh; overflow-y: auto; background: #0b1220; }
-            .msg { margin-bottom: 12px; }
+            .msg { margin-bottom: 12px; position: relative; }
             .role { font-size: 12px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.04em; }
             .bubble { padding: 10px 12px; border-radius: 8px; background: #111827; border: 1px solid #1f2937; }
             .me .bubble { background: #1d4ed8; border-color: #1e40af; color: #e2e8f0; }
+            .msg .actions { position: absolute; right: 4px; top: 4px; display: none; gap: 4px; }
+            .msg:hover .actions { display: inline-flex; }
+            .actions button { font-size: 11px; padding: 4px 6px; border-radius: 6px; border: 1px solid #334155; background: #1f2937; color: #e2e8f0; cursor: pointer; }
             form { padding: 12px 16px; background: #111827; display: grid; gap: 8px; }
             textarea { width: 100%; min-height: 80px; resize: vertical; border-radius: 8px; border: 1px solid #1f2937; background: #0f172a; color: #e2e8f0; padding: 8px; }
             button { border: none; border-radius: 8px; padding: 10px 14px; cursor: pointer; font-weight: 600; color: #0b1220; background: #38bdf8; }
@@ -64,26 +68,56 @@ def index() -> HTMLResponse:
             <div class="row">
                 <button type="submit">Send</button>
                 <button type="button" class="secondary" onclick="sendAdd()">Add (/add)</button>
-                <button type="button" class="ghost" onclick="loadHistory()">Refresh History</button>
+                <button type="button" class="ghost" onclick="loadHistory()">List history</button>
             </div>
         </form>
         <script>
             const logEl = document.getElementById('log');
             const inputEl = document.getElementById('input');
 
-            function renderMessage(role, content) {
+            function renderMessage(role, content, chunkId) {
                 const wrap = document.createElement('div');
                 wrap.className = 'msg ' + (role === 'user' ? 'me' : '');
+                if (chunkId) wrap.dataset.chunkId = chunkId;
                 const roleEl = document.createElement('div');
                 roleEl.className = 'role';
                 roleEl.textContent = role;
                 const bubble = document.createElement('div');
                 bubble.className = 'bubble';
                 bubble.innerHTML = marked.parse(content || '');
+                const actions = document.createElement('div');
+                actions.className = 'actions';
+                if (chunkId) {
+                    const del = document.createElement('button');
+                    del.textContent = '✕';
+                    del.title = 'Delete';
+                    del.onclick = () => deleteMessage(chunkId, wrap);
+                    actions.appendChild(del);
+                }
+                const copyBtn = document.createElement('button');
+                copyBtn.textContent = 'Copy';
+                copyBtn.onclick = () => copyMessage(content);
+                actions.appendChild(copyBtn);
+                wrap.appendChild(actions);
                 wrap.appendChild(roleEl);
                 wrap.appendChild(bubble);
                 logEl.appendChild(wrap);
                 logEl.scrollTop = logEl.scrollHeight;
+            }
+
+            async function copyMessage(text) {
+                try {
+                    await navigator.clipboard.writeText(text || '');
+                } catch (e) {
+                    console.warn('copy failed', e);
+                }
+            }
+
+            async function deleteMessage(chunkId, el) {
+                const res = await fetch(`/api/messages/${chunkId}`, { method: 'DELETE' });
+                if (res.ok && el) {
+                    el.remove();
+                }
             }
 
             async function sendChat() {
@@ -97,7 +131,7 @@ def index() -> HTMLResponse:
                     body: JSON.stringify({ text })
                 });
                 const data = await res.json();
-                (data.messages || []).forEach(m => renderMessage(m.role, m.content));
+                (data.messages || []).forEach(m => renderMessage(m.role, m.content, m.chunk_id));
             }
 
             async function sendAdd() {
@@ -116,17 +150,15 @@ def index() -> HTMLResponse:
             async function runRss() {
                 const res = await fetch('/api/rss', { method: 'POST' });
                 const data = await res.json();
-                (data.messages || []).forEach(m => renderMessage(m.role, m.content));
+                (data.messages || []).forEach(m => renderMessage(m.role, m.content, m.chunk_id));
             }
 
             async function loadHistory() {
                 const res = await fetch('/api/messages?limit=50');
                 const data = await res.json();
                 logEl.innerHTML = '';
-                (data.messages || []).forEach(m => renderMessage(m.role, m.content));
+                (data.messages || []).forEach(m => renderMessage(m.role, m.content, m.chunk_id));
             }
-
-            loadHistory();
         </script>
     </body>
     </html>
@@ -138,6 +170,12 @@ def index() -> HTMLResponse:
 def get_messages(limit: int = 50) -> dict:
     msgs: List[Message] = workspace.list_recent(limit)
     return {"messages": [msg_to_dict(m) for m in msgs]}
+
+
+@app.delete("/api/messages/{chunk_id}")
+def delete_message(chunk_id: int) -> dict:
+    ok = workspace.delete_chunk(chunk_id)
+    return {"deleted": ok}
 
 
 @app.post("/api/chat")
