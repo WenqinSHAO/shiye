@@ -28,7 +28,7 @@ def test_handle_add_refs_only():
     logs = handle_add("refs https://example.com note here", ws, orch)
     assert ws.added  # note stored
     assert not ws.docs  # nothing fetched
-    assert logs and "references" in logs[0]
+    assert logs and "references" in logs[0]["text"]
 
 
 def test_handle_add_fetch_single(monkeypatch):
@@ -38,4 +38,4 @@ def test_handle_add_fetch_single(monkeypatch):
     monkeypatch.setattr("handlers.fetch_url_content", lambda url: ("Title", "Body text", "mock"))
     logs = handle_add("fetch https://example.com", ws, orch)
     assert ws.docs  # fetched content stored as document
-    assert any("fetched" in line for line in logs)
+    assert any("fetched" in entry["text"] for entry in logs)

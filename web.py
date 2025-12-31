@@ -70,12 +70,16 @@ def index() -> HTMLResponse:
         <header>
             <div><strong>Shiye</strong> — Web UI</div>
             <div class="row">
+                <label style="display:flex;align-items:center;gap:6px;color:#cbd5e1;font-size:12px;">
+                    <input type="checkbox" id="debugToggle" onclick="toggleDebug()" />
+                    debug
+                </label>
                 <button class="ghost" onclick="runRss()">Run RSS</button>
                 <button class="ghost" onclick="loadTrace()">LLM Trace</button>
             </div>
         </header>
         <div id="log"></div>
-        <div id="trace" style="padding:8px 16px; font-size:12px; color:#94a3b8;"></div>
+        <div id="trace" style="padding:8px 16px; font-size:12px; color:#94a3b8; display:none;"></div>
         <form onsubmit="event.preventDefault(); sendChat();">
             <textarea id="input" placeholder="Type a message... (/add to archive, /rss to summarize feeds)"></textarea>
             <div class="row">
@@ -87,8 +91,10 @@ def index() -> HTMLResponse:
         <script>
             const logEl = document.getElementById('log');
             const inputEl = document.getElementById('input');
+            const debugToggle = document.getElementById('debugToggle');
+            const traceEl = document.getElementById('trace');
 
-            function renderMessage(role, content, chunkId, createdAt) {
+            function renderMessage(role, content, chunkId, createdAt, debug) {
                 const wrap = document.createElement('div');
                 wrap.className = 'msg ' + (role === 'user' ? 'me' : '');
                 if (chunkId) wrap.dataset.chunkId = chunkId;
@@ -112,6 +118,16 @@ def index() -> HTMLResponse:
                 copyBtn.textContent = 'Copy';
                 copyBtn.onclick = () => copyMessage(content);
                 actions.appendChild(copyBtn);
+                if (debug) {
+                    const dbg = document.createElement('pre');
+                    dbg.style.fontSize = '11px';
+                    dbg.style.background = '#0f172a';
+                    dbg.style.border = '1px solid #1f2937';
+                    dbg.style.padding = '6px';
+                    dbg.style.marginTop = '6px';
+                    dbg.textContent = JSON.stringify(debug, null, 2);
+                    bubble.appendChild(dbg);
+                }
                 wrap.appendChild(actions);
                 wrap.appendChild(roleEl);
                 wrap.appendChild(bubble);
@@ -179,6 +195,16 @@ def index() -> HTMLResponse:
                 logEl.innerHTML = '';
                 (data.messages || []).forEach(m => renderMessage(m.role, m.content, m.chunk_id, m.created_at));
             }
+
+            async function loadTrace() {
+                const res = await fetch('/api/llm_trace');
+                const data = await res.json();
+                document.getElementById('trace').textContent = JSON.stringify(data.trace || {}, null, 2);
+            }
+
+            function toggleDebug() {
+                traceEl.style.display = debugToggle.checked ? 'block' : 'none';
+            }
         </script>
     </body>
     </html>
@@ -207,11 +233,12 @@ def delete_message(chunk_id: int) -> dict:
 @app.post("/api/chat")
 def chat(payload=Body(...)) -> dict:
     text = (payload or {}).get("text", "")
+    debug = bool((payload or {}).get("debug"))
     if not text:
         return {"messages": []}
     if text.strip().startswith("/add"):
-        logs = handle_add(text.strip().removeprefix("/add").strip(), workspace, orchestrator)
-        return {"messages": [make_system_msg(line) for line in logs]}
+        logs = handle_add(text.strip().removeprefix("/add").strip(), workspace, orchestrator, debug=debug)
+        return {"messages": [make_system_msg(log["text"]) | {"debug": log.get("debug")} for log in logs]}
     reply = orchestrator.timelinereply(text)
     if isinstance(reply, list):
         messages = [msg_to_dict(m) for m in reply]
@@ -224,16 +251,20 @@ def chat(payload=Body(...)) -> dict:
             "metadata": {},
             "chunk_id": None,
         }]
+    if debug:
+        for m in messages:
+            m["debug"] = orchestrator.last_llm_trace
     return {"messages": messages}
 
 
 @app.post("/api/add")
 def add(payload=Body(...)) -> dict:
     text = (payload or {}).get("text", "")
+    debug = bool((payload or {}).get("debug"))
     if not text:
         return {"logs": ["[add] missing text"]}
-    logs = handle_add(text, workspace, orchestrator)
-    return {"logs": logs}
+    logs = handle_add(text, workspace, orchestrator, debug=debug)
+    return {"logs": [log["text"] for log in logs]}
 
 
 @app.post("/api/rss")

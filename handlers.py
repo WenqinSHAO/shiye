@@ -12,7 +12,7 @@ def _store_note_and_refs(workspace, note_text: str, urls: List[str], refs_only: 
     workspace.add(msg)
 
 
-def handle_add(arg: str, workspace, orchestrator) -> List[str]:
+def handle_add(arg: str, workspace, orchestrator, debug: bool = False) -> List[dict]:
     """Handle /add logic for both CLI and web."""
     tokens = arg.split()
     mode: Optional[str] = None
@@ -21,17 +21,17 @@ def handle_add(arg: str, workspace, orchestrator) -> List[str]:
         arg = " ".join(tokens[1:])
     urls = extract_urls(arg)
     note_text = arg.strip()
-    logs: List[str] = []
+    logs: List[dict] = []
 
     if urls:
         if len(urls) > 1 and mode != "fetch":
             _store_note_and_refs(workspace, note_text, urls, refs_only=True)
-            logs.append("[add] multiple URLs detected; saved note + references. Re-run with '/add fetch ...' to fetch contents.")
+            logs.append({"text": "[add] multiple URLs detected; saved note + references. Re-run with '/add fetch ...' to fetch contents.", "debug": None})
             return logs
 
         if mode == "refs":
             _store_note_and_refs(workspace, note_text, urls, refs_only=True)
-            logs.append("[add] saved note + references (no fetch).")
+            logs.append({"text": "[add] saved note + references (no fetch).", "debug": None})
             return logs
 
         # fetch content for URLs
@@ -41,7 +41,7 @@ def handle_add(arg: str, workspace, orchestrator) -> List[str]:
         for url in urls:
             title, content, method = fetch_url_content(url)
             if not content:
-                logs.append(f"[add] fetch failed for {url}; saved note only.")
+                logs.append({"text": f"[add] fetch failed for {url}; saved note only.", "debug": None})
                 continue
             msg = Message(
                 content=content,
@@ -51,7 +51,7 @@ def handle_add(arg: str, workspace, orchestrator) -> List[str]:
             workspace.add_with_document(
                 [msg],
                 document_meta={
-                    "doc_type": "web_page",
+                    "doc_type": "web_page" if method != "arxiv_meta" else "paper",
                     "title": title,
                     "source": "url",
                     "uri": url,
@@ -59,10 +59,12 @@ def handle_add(arg: str, workspace, orchestrator) -> List[str]:
                 },
             )
             fetched += 1
-        logs.append(f"[ok] saved note and fetched {fetched}/{len(urls)} URL(s).")
+            if debug:
+                logs.append({"text": f"[add] fetched {url} [{method}] ({title})", "debug": {"url": url, "title": title, "method": method}})
+        logs.append({"text": f"[ok] saved note and fetched {fetched}/{len(urls)} URL(s).", "debug": None})
         return logs
 
     # no URLs: regular add via timechunker
     orchestrator.timechunker(text=arg, role_hint="user")
-    logs.append("[ok] added to memory")
+    logs.append({"text": "[ok] added to memory", "debug": None})
     return logs

@@ -73,12 +73,13 @@ class Orchestrator:
     def basereply(self, instruction: str, user_text: List[Message]) -> List[Message]:
         if self.dspy_predictor:
             try:
+                ctx = self.workspace.context_block(n=200)
                 self.last_llm_trace = {
                     "type": "reply",
                     "ts": datetime.now(UTC).isoformat(),
                     "instruction": instruction,
                     "question": [m.to_dict() for m in user_text],
-                    "context_len": len(self.workspace.context_block(n=200)),
+                    "context": [m.to_dict() for m in ctx],
                 }
                 out = self.dspy_predictor(
                     instruction= instruction or "You are a concise, independent-minded assistant.",
