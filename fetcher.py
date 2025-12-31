@@ -12,11 +12,29 @@ URL_REGEX = re.compile(r"https?://\S+")
 
 
 def extract_urls(text: str) -> List[str]:
+    """Extract all HTTP/HTTPS URLs from the given text.
+    
+    Args:
+        text: Input text to search for URLs.
+        
+    Returns:
+        List of URL strings found in the text.
+    """
     return URL_REGEX.findall(text or "")
 
 
 def github_raw_url(url: str) -> Optional[str]:
-    """Map common GitHub URLs to raw content URLs (repo README or blob)."""
+    """Map common GitHub URLs to raw content URLs.
+    
+    Handles repository root URLs, blob paths, and tree paths by converting
+    them to raw.githubusercontent.com URLs.
+    
+    Args:
+        url: GitHub URL to convert.
+        
+    Returns:
+        Raw content URL or None if not a valid GitHub URL.
+    """
     parsed = urlparse(url)
     if parsed.netloc not in ("github.com", "www.github.com"):
         return None
@@ -43,6 +61,14 @@ def github_raw_url(url: str) -> Optional[str]:
 
 
 def arxiv_meta(url: str) -> Optional[Tuple[str, str]]:
+    """Extract title and abstract from an arXiv paper URL.
+    
+    Args:
+        url: arXiv paper URL.
+        
+    Returns:
+        Tuple of (title, abstract) or None if extraction fails.
+    """
     parsed = urlparse(url)
     if parsed.netloc not in ("arxiv.org", "www.arxiv.org"):
         return None
@@ -75,7 +101,23 @@ def arxiv_meta(url: str) -> Optional[Tuple[str, str]]:
 
 
 def fetch_url_content(url: str, timeout: int = 10) -> Tuple[Optional[str], Optional[str], str]:
-    """Fetch URL and return (title, text, method) using readability with fallback."""
+    """Fetch and extract content from a URL.
+    
+    Tries multiple extraction methods in order:
+    1. arXiv metadata extraction
+    2. GitHub raw content
+    3. Readability library extraction
+    4. Fallback to full page text
+    
+    Args:
+        url: The URL to fetch content from.
+        timeout: Request timeout in seconds (default: 10).
+        
+    Returns:
+        Tuple of (title, content, method) where method indicates the
+        extraction technique used ('arxiv_meta', 'github_raw', 
+        'readability', 'fallback', or 'error').
+    """
     session = requests.Session()
     headers = {
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",

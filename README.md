@@ -1,89 +1,224 @@
-# Minimum personal assistant: Shiye (师爷)
+# Shiye (师爷) - Personal AI Assistant
 
-## Current status
+Shiye is a personal AI assistant that serves as your "off-brain" memory system with chat-based interaction, persistent storage, and micro-automation capabilities.
 
-### Dev run
+## Quick Start
 
-Start the web app:
+### Prerequisites
+
+- Python 3.10+
+- Required API keys:
+  - `DS_API_KEY` - Deepseek API key for LLM functionality
+
+### Installation
 
 ```bash
-python main.py  # or: uvicorn web:app --reload --port 8000
+# Clone the repository
+git clone https://github.com/WenqinSHAO/shiye.git
+cd shiye
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Set up environment variables
+export DS_API_KEY="your-deepseek-api-key"
+
+# Optional: customize data directory (default: ~/.shiye)
+export SHIYE_DATA_DIR="/path/to/data"
+export SHIYE_EMBED_MODEL="sentence-transformers/all-MiniLM-L6-v2"
 ```
 
-What it does:
+### Running the Application
 
-- multi-round chat with DS backend
-- browser UI with history + note mode (terminal UI deprecated)
-- add stuff to the context, sorta in context learning
-- summarize the context
-- enhanced timeline processing
-- paste-friendly inputs with Markdown rendering (math + images)
+```bash
+# Start the web server
+python main.py
 
-Storage/embeddings (v0):
+# Or use uvicorn directly with auto-reload
+uvicorn web:app --reload --port 8000
+```
 
-- Local SQLite + FAISS live under `~/.shiye` by default (override with `SHIYE_DATA_DIR`).
-- Default embedding model: `sentence-transformers/all-MiniLM-L6-v2` (override with `SHIYE_EMBED_MODEL`); download once while online.
-- Requires `faiss-cpu` and `sentence-transformers` from `requirements.txt`.
+Visit `http://localhost:8000` in your browser.
 
-Testing:
+### Configuration
 
-- Activate your env (e.g., `source ~/.virtualenvs/dspytest/bin/activate`) and run `python -m pytest -q`.
-- Tests use temp data dirs; the real files appear after you run the app or write to the store (default `~/.shiye/shiye.db` and `~/.shiye/shiye.faiss`).
+Environment variables:
+- `SHIYE_DATA_DIR` - Data directory (default: `~/.shiye`)
+- `SHIYE_HOST` - Server host (default: `127.0.0.1`)
+- `SHIYE_PORT` - Server port (default: `8000`)
+- `SHIYE_RELOAD` - Enable auto-reload (default: `false`)
+- `SHIYE_EMBED_MODEL` - Embedding model (default: `sentence-transformers/all-MiniLM-L6-v2`)
+- `SHIYE_MODEL_CACHE` - Model cache directory (default: `~/.shiye/models`)
 
-Web UI:
+## Features
 
-- Visit `http://localhost:8000` after starting the server.
-- Commands: `/note` (3-panel note mode), `/add` (URLs/notes), `/rss`, `/summarize`, `/clear` (clears on-screen log only).
-- Chat, run `/rss`, toggle `/note` for the markdown note taker, `/add` URLs/notes, `/clear` to clear the on-screen log (does not wipe storage).
+### Core Capabilities
 
-## Data model (working)
+- **Multi-round Chat**: Conversational interface with DSPy-powered LLM backend
+- **Persistent Memory**: Local SQLite database + FAISS vector embeddings for semantic search
+- **Note Taking**: Rich markdown editor with image support and math rendering
+- **Web Content Fetching**: Extract and store content from URLs
+- **RSS Feed Aggregation**: Daily summaries from configured feeds
+- **Time-Aware Context**: Automatic timestamp handling and temporal reasoning
 
-### Timestamps
-- `created_at` (chunks/documents/messages): when the chunk was stored; normalized to UTC ISO (`YYYY-MM-DDTHH:MM:SS.ssssss+00:00`). If the source lacks tzinfo, it is forced to UTC.
-- `event_at` (optional): when the content actually happened (user-provided or inferred). Stored as UTC ISO; absent when not provided.
-- `ingested_at` (documents): when the document landed in the store (UTC ISO).
-- UI note: the web log shows `created_at`; note editor shows `updated_at` derived from `event_at` or `created_at`.
+### Web UI Commands
 
-Extraction/assignment:
-- User input: timestamped at receipt (`created_at=now`).
-- DSPy replies or fallbacks: timestamped at generation (`created_at=now`).
-- `/add` fetches: fetched content gets `created_at/ingested_at=now`; `event_at` unset unless provided.
-- Notes: `created_at` on first save; `event_at` reused as “last changed” and mirrored into tags as `last_changed`.
+- **Chat**: Natural conversation with context from stored memories
+- `/note` - Open 3-panel note-taking mode with markdown support
+- `/add <text>` - Add notes or fetch URL content
+  - `/add fetch <url>` - Fetch and store web page content
+  - `/add refs <urls>` - Store URL references without fetching
+- `/rss` - Generate daily RSS digest from configured feeds
+- `/summarize` - Summarize current conversation context
+- `/clear` - Clear on-screen chat log (doesn't affect storage)
 
-### Document types in use
-- `chat` (default chat log document).
-- `note` (Markdown notes created via `/note`; images referenced in tags).
-- `web_page` (fetched URL content via `/add fetch ...`).
-- `paper` (arXiv metadata extraction via `/add fetch`).
-- `rss_daily_summary` (daily RSS brief).
-- Future/other: generic `system`/`user_note` chunks live under `chat` unless explicitly stored as a document.
+### Data Storage
 
-RSS brief (micro-app):
+**Location**: Local storage under `~/.shiye/` (configurable)
+- `shiye.db` - SQLite database for metadata
+- `shiye.faiss` - FAISS index for embeddings
+- `models/` - Cached embedding models
 
-- Configure feeds in `rss_feeds.txt` (one URL per line). Defaults include Google Research, OpenAI, DeepMind, Microsoft Research.
-- Run `/rss` in the app to fetch latest items, cap per feed, and generate a concise digest with references. The daily digest is stored as `doc_type=rss_daily_summary` in local storage.
+**Document Types**:
+- `chat` - Conversation logs
+- `note` - Markdown notes with images
+- `web_page` - Fetched URL content
+- `paper` - ArXiv paper metadata
+- `rss_daily_summary` - RSS feed digests
 
-Planning/roadmap: see `TODO.md` for the working plan and open questions.
+**Timestamps**:
+- `created_at` - When content was stored (UTC ISO format)
+- `event_at` - When content actually occurred (optional, user-provided)
+- `ingested_at` - When document was added to storage
 
-## End Goal
+## Architecture
 
-Functions-wise, what's most important to me, for my personal uses:
+### Components
 
-- a personal off-brain data bank storing raw original date, and strucutrized ones easier for LLM investigation
-  - web, wechat readings
-  - acamdeic papers, pdfs
-  - books, epub, mobi
-  - mails
-  - etc.
-- a mostly chat based assistant inferace that
-  - makes add-hoc tools/mini app from test instructions, tool execution via LLM API or scripts
-  - maintains the personal off-brain data banks, knows what are my current focus topics, what out stall archives
-  - updates the off-brain data banks with meaningful exchanges with the assistant
-  - is sessionless facing the user, yet user may still explicit ask to start afresh or telling the focus topic as of now
-  - make good use of the off-brain data banks in interactions, yet may also makes searches or call other tools to help along with the quest
-  - may use different LLM backend eventual
-  - proactively suggestion actions at fitting moment
+```
+┌─────────────────────────────────────────────────┐
+│              Web Interface (web.py)             │
+│                 FastAPI + HTML/JS               │
+└───────────────────┬─────────────────────────────┘
+                    │
+┌───────────────────┴─────────────────────────────┐
+│         Orchestrator (orchestrator.py)          │
+│         DSPy-based LLM coordination             │
+└───────────────────┬─────────────────────────────┘
+                    │
+        ┌───────────┴───────────┐
+        │                       │
+┌───────┴────────┐    ┌─────────┴─────────┐
+│   Workspace    │    │     Handlers      │
+│ (workspace.py) │    │  (handlers.py)    │
+└───────┬────────┘    └─────────┬─────────┘
+        │                       │
+        └───────────┬───────────┘
+                    │
+        ┌───────────┴───────────────────┐
+        │                               │
+┌───────┴────────┐            ┌─────────┴─────────┐
+│  LocalStore    │            │    Fetcher        │
+│  (storage.py)  │            │  (fetcher.py)     │
+│  SQLite + Tags │            │  URL extraction   │
+└───────┬────────┘            └───────────────────┘
+        │
+        ├─────────────────┬──────────────────┐
+        │                 │                  │
+┌───────┴────────┐ ┌──────┴─────────┐ ┌─────┴─────────┐
+│  Vector Store  │ │  Embeddings    │ │  Data Types   │
+│(vector_store.py)│ │(embeddings.py) │ │(datatypes.py) │
+│  FAISS index   │ │  Transformers  │ │  Message, Role│
+└────────────────┘ └────────────────┘ └───────────────┘
+```
 
-## achitectural considerations
+### Key Modules
 
-TBD, main components, what to build first
+- **web.py** - FastAPI application and HTTP endpoints
+- **orchestrator.py** - LLM coordination with DSPy
+- **workspace.py** - High-level memory operations interface
+- **storage.py** - SQLite + FAISS persistence layer
+- **handlers.py** - Command handlers (add, fetch, etc.)
+- **fetcher.py** - URL content extraction
+- **rss.py** - RSS feed aggregation
+- **embeddings.py** - Sentence transformer embeddings
+- **vector_store.py** - FAISS index management
+- **datatypes.py** - Core data structures
+
+## Development
+
+### Running Tests
+
+```bash
+# Install test dependencies
+pip install pytest
+
+# Run all tests
+python -m pytest tests/ -v
+
+# Run specific test file
+python -m pytest tests/test_storage.py -v
+```
+
+### Project Structure
+
+```
+shiye/
+├── main.py              # Application entry point
+├── web.py               # FastAPI web interface
+├── orchestrator.py      # LLM orchestration
+├── workspace.py         # Memory workspace
+├── storage.py           # Data persistence
+├── handlers.py          # Command handlers
+├── fetcher.py          # Content fetching
+├── rss.py              # RSS aggregation
+├── embeddings.py       # Embedding provider
+├── vector_store.py     # FAISS vector index
+├── datatypes.py        # Core data types
+├── config.py           # Configuration
+├── tests/              # Test suite
+├── assets/             # Static files (images, CSS, JS)
+├── requirements.txt    # Python dependencies
+├── README.md          # This file
+└── TODO.md            # Planning and roadmap
+```
+
+### Adding Features
+
+1. **Storage**: Extend `storage.py` for new document types
+2. **Commands**: Add handlers in `handlers.py` and wire in `web.py`
+3. **UI**: Update HTML/JS in `web.py` or add to `assets/`
+4. **LLM**: Modify signatures and logic in `orchestrator.py`
+
+## Vision and Roadmap
+
+See [TODO.md](TODO.md) for detailed planning, architectural decisions, and future milestones.
+
+### Long-term Goals
+
+- **Unified Ingest**: Support for files, emails, WeChat exports, EPUBs, PDFs
+- **Smart Retrieval**: Semantic + temporal search with focus-topic awareness
+- **Tool Execution**: Safe code execution with audit trails
+- **Multi-Model**: Pluggable LLM backends with routing
+- **Privacy First**: Local-first with optional encrypted sync
+
+## Contributing
+
+Contributions welcome! Please:
+1. Fork the repository
+2. Create a feature branch
+3. Add tests for new functionality
+4. Ensure existing tests pass
+5. Submit a pull request
+
+## License
+
+See LICENSE file for details.
+
+## Acknowledgments
+
+Built with:
+- [DSPy](https://github.com/stanfordnlp/dspy) - LLM programming framework
+- [FastAPI](https://fastapi.tiangolo.com/) - Web framework
+- [FAISS](https://github.com/facebookresearch/faiss) - Vector similarity search
+- [Sentence Transformers](https://www.sbert.net/) - Text embeddings

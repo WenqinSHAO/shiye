@@ -7,6 +7,15 @@ import feedparser
 
 
 def load_feed_urls(path: Path = Path("rss_feeds.txt")) -> List[str]:
+    """Load RSS feed URLs from a text file.
+    
+    Args:
+        path: Path to the file containing feed URLs (one per line).
+              Lines starting with # are treated as comments.
+              
+    Returns:
+        List of feed URL strings.
+    """
     if not path.exists():
         return []
     lines = [ln.strip() for ln in path.read_text().splitlines()]
@@ -14,6 +23,16 @@ def load_feed_urls(path: Path = Path("rss_feeds.txt")) -> List[str]:
 
 
 def _parse_datetime(dt_str: Optional[str]) -> Optional[datetime]:
+    """Parse datetime string from RSS feeds.
+    
+    Tries ISO format first, then RFC 822 format.
+    
+    Args:
+        dt_str: Datetime string to parse.
+        
+    Returns:
+        Parsed datetime with UTC timezone or None if parsing fails.
+    """
     if not dt_str:
         return None
     try:
@@ -29,6 +48,16 @@ def _parse_datetime(dt_str: Optional[str]) -> Optional[datetime]:
 
 
 def fetch_feed(url: str, per_feed_limit: int = 3) -> List[Dict]:
+    """Fetch and parse RSS feed entries from a URL.
+    
+    Args:
+        url: RSS feed URL.
+        per_feed_limit: Maximum number of items to return (default: 3).
+        
+    Returns:
+        List of feed items sorted by publication date (newest first),
+        each item containing title, link, published, feed, and summary.
+    """
     parsed = feedparser.parse(url)
     items: List[Dict] = []
     for entry in parsed.entries[: per_feed_limit * 3]:  # grab extra before filtering
@@ -55,6 +84,16 @@ def fetch_feed(url: str, per_feed_limit: int = 3) -> List[Dict]:
 
 
 def fetch_all(feeds: Iterable[str], per_feed_limit: int = 3, total_limit: int = 20) -> List[Dict]:
+    """Fetch items from multiple RSS feeds with deduplication.
+    
+    Args:
+        feeds: Iterable of feed URLs.
+        per_feed_limit: Maximum items per feed (default: 3).
+        total_limit: Maximum total items across all feeds (default: 20).
+        
+    Returns:
+        Deduplicated list of feed items from all feeds, capped at total_limit.
+    """
     all_items: List[Dict] = []
     seen_hashes = set()
     for feed in feeds:
@@ -70,6 +109,15 @@ def fetch_all(feeds: Iterable[str], per_feed_limit: int = 3, total_limit: int = 
 
 
 def format_digest(items: List[Dict], keywords: Optional[List[str]] = None) -> str:
+    """Format feed items into a human-readable daily digest.
+    
+    Args:
+        items: List of feed items to format.
+        keywords: Optional list of focus keywords to append.
+        
+    Returns:
+        Formatted digest string with numbered items and metadata.
+    """
     if not items:
         return "[rss] no items found."
     lines = ["Daily RSS brief:"]
