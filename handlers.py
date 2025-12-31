@@ -39,14 +39,14 @@ def handle_add(arg: str, workspace, orchestrator) -> List[str]:
         note_msg = Message(content=note_text, role=Role.USER, metadata={"urls": urls, "note_type": "user_note"})
         workspace.add(note_msg)
         for url in urls:
-            title, content = fetch_url_content(url)
+            title, content, method = fetch_url_content(url)
             if not content:
                 logs.append(f"[add] fetch failed for {url}; saved note only.")
                 continue
             msg = Message(
                 content=content,
                 role=Role.SYSTEM,
-                metadata={"url": url, "title": title, "source": "url_fetch"},
+                metadata={"url": url, "title": title, "source": "url_fetch", "extraction": method},
             )
             workspace.add_with_document(
                 [msg],
@@ -55,7 +55,7 @@ def handle_add(arg: str, workspace, orchestrator) -> List[str]:
                     "title": title,
                     "source": "url",
                     "uri": url,
-                    "tags": {"url": url, "note_present": bool(note_text)},
+                    "tags": {"url": url, "note_present": bool(note_text), "extraction": method},
                 },
             )
             fetched += 1

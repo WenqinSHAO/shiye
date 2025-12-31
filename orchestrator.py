@@ -52,6 +52,7 @@ class Orchestrator:
         self.workspace = workspace
         self.dspy_predictor = dspy.Predict(Reply) if llm_key else None
         self.dspy_chunker = dspy.Predict(TimeChunker) if llm_key else None
+        self.last_llm_trace: Optional[dict] = None
 
 
     def timechunker(self, text: str, role_hint: str = "user") -> List[Message]:
@@ -72,6 +73,13 @@ class Orchestrator:
     def basereply(self, instruction: str, user_text: List[Message]) -> List[Message]:
         if self.dspy_predictor:
             try:
+                self.last_llm_trace = {
+                    "type": "reply",
+                    "ts": datetime.now(UTC).isoformat(),
+                    "instruction": instruction,
+                    "question": [m.to_dict() for m in user_text],
+                    "context_len": len(self.workspace.context_block(n=200)),
+                }
                 out = self.dspy_predictor(
                     instruction= instruction or "You are a concise, independent-minded assistant.",
                     question=user_text,
@@ -147,6 +155,12 @@ class Orchestrator:
                     "Highlight what might interest the user. Include inline references with the title and URL. "
                     f"Keywords to bias toward: {', '.join(keywords)}."
                 )
+                self.last_llm_trace = {
+                    "type": "rss_summary",
+                    "ts": datetime.now(UTC).isoformat(),
+                    "instruction": instruction,
+                    "items": items,
+                }
                 out = self.dspy_predictor(
                     instruction=instruction,
                     question=[],

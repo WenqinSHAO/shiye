@@ -35,7 +35,7 @@ def test_handle_add_fetch_single(monkeypatch):
     ws = DummyWS()
     orch = DummyOrch()
     # mock fetcher
-    monkeypatch.setattr("handlers.fetch_url_content", lambda url: ("Title", "Body text"))
+    monkeypatch.setattr("handlers.fetch_url_content", lambda url: ("Title", "Body text", "mock"))
     logs = handle_add("fetch https://example.com", ws, orch)
     assert ws.docs  # fetched content stored as document
     assert any("fetched" in line for line in logs)

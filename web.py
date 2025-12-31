@@ -3,6 +3,7 @@ from typing import List
 
 from fastapi import Body, FastAPI
 from fastapi.responses import HTMLResponse
+from datetime import UTC, datetime
 
 from datatypes import Message
 from handlers import handle_add
@@ -24,6 +25,16 @@ def msg_to_dict(m: Message) -> dict:
         "reference_time": m.reference_time.isoformat() if m.reference_time else None,
         "metadata": m.metadata,
         "chunk_id": m.metadata.get("chunk_id"),
+    }
+
+def make_system_msg(content: str) -> dict:
+    return {
+        "content": content,
+        "role": "system",
+        "created_at": datetime.now(UTC).isoformat(),
+        "reference_time": None,
+        "metadata": {},
+        "chunk_id": None,
     }
 
 
@@ -60,9 +71,11 @@ def index() -> HTMLResponse:
             <div><strong>Shiye</strong> — Web UI</div>
             <div class="row">
                 <button class="ghost" onclick="runRss()">Run RSS</button>
+                <button class="ghost" onclick="loadTrace()">LLM Trace</button>
             </div>
         </header>
         <div id="log"></div>
+        <div id="trace" style="padding:8px 16px; font-size:12px; color:#94a3b8;"></div>
         <form onsubmit="event.preventDefault(); sendChat();">
             <textarea id="input" placeholder="Type a message... (/add to archive, /rss to summarize feeds)"></textarea>
             <div class="row">
@@ -75,13 +88,14 @@ def index() -> HTMLResponse:
             const logEl = document.getElementById('log');
             const inputEl = document.getElementById('input');
 
-            function renderMessage(role, content, chunkId) {
+            function renderMessage(role, content, chunkId, createdAt) {
                 const wrap = document.createElement('div');
                 wrap.className = 'msg ' + (role === 'user' ? 'me' : '');
                 if (chunkId) wrap.dataset.chunkId = chunkId;
                 const roleEl = document.createElement('div');
                 roleEl.className = 'role';
-                roleEl.textContent = role;
+                const ts = createdAt ? new Date(createdAt).toLocaleString() : new Date().toLocaleString();
+                roleEl.textContent = role + " • " + ts;
                 const bubble = document.createElement('div');
                 bubble.className = 'bubble';
                 bubble.innerHTML = marked.parse(content || '');
@@ -105,6 +119,12 @@ def index() -> HTMLResponse:
                 logEl.scrollTop = logEl.scrollHeight;
             }
 
+            async function loadTrace() {
+                const res = await fetch('/api/llm_trace');
+                const data = await res.json();
+                document.getElementById('trace').textContent = JSON.stringify(data.trace || {}, null, 2);
+            }
+
             async function copyMessage(text) {
                 try {
                     await navigator.clipboard.writeText(text || '');
@@ -123,7 +143,7 @@ def index() -> HTMLResponse:
             async function sendChat() {
                 const text = inputEl.value.trim();
                 if (!text) return;
-                renderMessage('you', text);
+                renderMessage('you', text, null, new Date().toISOString());
                 inputEl.value = '';
                 const res = await fetch('/api/chat', {
                     method: 'POST',
@@ -131,7 +151,7 @@ def index() -> HTMLResponse:
                     body: JSON.stringify({ text })
                 });
                 const data = await res.json();
-                (data.messages || []).forEach(m => renderMessage(m.role, m.content, m.chunk_id));
+                (data.messages || []).forEach(m => renderMessage(m.role, m.content, m.chunk_id, m.created_at));
             }
 
             async function sendAdd() {
@@ -144,20 +164,20 @@ def index() -> HTMLResponse:
                     body: JSON.stringify({ text })
                 });
                 const data = await res.json();
-                (data.logs || []).forEach(line => renderMessage('system', line));
+                (data.logs || []).forEach(line => renderMessage('system', line, null, new Date().toISOString()));
             }
 
             async function runRss() {
                 const res = await fetch('/api/rss', { method: 'POST' });
                 const data = await res.json();
-                (data.messages || []).forEach(m => renderMessage(m.role, m.content, m.chunk_id));
+                (data.messages || []).forEach(m => renderMessage(m.role, m.content, m.chunk_id, m.created_at));
             }
 
             async function loadHistory() {
                 const res = await fetch('/api/messages?limit=50');
                 const data = await res.json();
                 logEl.innerHTML = '';
-                (data.messages || []).forEach(m => renderMessage(m.role, m.content, m.chunk_id));
+                (data.messages || []).forEach(m => renderMessage(m.role, m.content, m.chunk_id, m.created_at));
             }
         </script>
     </body>
@@ -169,6 +189,12 @@ def index() -> HTMLResponse:
 @app.get("/api/messages")
 def get_messages(limit: int = 50) -> dict:
     msgs: List[Message] = workspace.list_recent(limit)
+    def _ts(msg: Message) -> float:
+        dt = msg.created_at
+        if dt.tzinfo:
+            return dt.timestamp()
+        return dt.replace(tzinfo=UTC).timestamp()
+    msgs = sorted(msgs, key=_ts)
     return {"messages": [msg_to_dict(m) for m in msgs]}
 
 
@@ -183,11 +209,21 @@ def chat(payload=Body(...)) -> dict:
     text = (payload or {}).get("text", "")
     if not text:
         return {"messages": []}
+    if text.strip().startswith("/add"):
+        logs = handle_add(text.strip().removeprefix("/add").strip(), workspace, orchestrator)
+        return {"messages": [make_system_msg(line) for line in logs]}
     reply = orchestrator.timelinereply(text)
     if isinstance(reply, list):
         messages = [msg_to_dict(m) for m in reply]
     else:
-        messages = [{"content": str(reply), "role": "assistant"}]
+        messages = [{
+            "content": str(reply),
+            "role": "assistant",
+            "created_at": datetime.now(UTC).isoformat(),
+            "reference_time": None,
+            "metadata": {},
+            "chunk_id": None,
+        }]
     return {"messages": messages}
 
 
@@ -204,14 +240,19 @@ def add(payload=Body(...)) -> dict:
 def run_rss() -> dict:
     feeds = rss.load_feed_urls()
     if not feeds:
-        return {"messages": [{"content": "[rss] no feeds configured (rss_feeds.txt)", "role": "system"}]}
+        return {"messages": [make_system_msg("[rss] no feeds configured (rss_feeds.txt)")] }
     try:
         items = rss.fetch_all(feeds, per_feed_limit=3, total_limit=20)
     except Exception as e:
-        return {"messages": [{"content": f"[rss] fetch failed: {e}", "role": "system"}]}
+        return {"messages": [make_system_msg(f"[rss] fetch failed: {e}")] }
     if not items:
-        return {"messages": [{"content": "[rss] no items found.", "role": "system"}]}
+        return {"messages": [make_system_msg("[rss] no items found.")]}
     keywords = ["AI infra", "LLM", "AI coding", "Agent", "Agentic AI", "machine learning", "attention", "memory"]
     summary = orchestrator.summarize_rss(items, keywords=keywords)
     messages = [msg_to_dict(m) for m in summary]
     return {"messages": messages}
+
+
+@app.get("/api/llm_trace")
+def llm_trace() -> dict:
+    return {"trace": orchestrator.last_llm_trace}
