@@ -1,27 +1,23 @@
 # Minimum personal assistant: Shiye (师爷)
 
-> a baby step a day, or maybe every two, three, four... days...
-
 ## Current status
 
 ### Dev run
 
-![](./screenshot.svg)
-
-The ongoing project:
+Start the web app:
 
 ```bash
-python main.py
+python main.py  # or: uvicorn web:app --reload --port 8000
 ```
 
 What it does:
 
 - multi-round chat with DS backend
-- Text UI
+- browser UI with history + note mode (terminal UI deprecated)
 - add stuff to the context, sorta in context learning
 - summarize the context
 - enhanced timeline processing
-- multiple copy input input box
+- paste-friendly inputs with Markdown rendering (math + images)
 
 Storage/embeddings (v0):
 
@@ -34,10 +30,33 @@ Testing:
 - Activate your env (e.g., `source ~/.virtualenvs/dspytest/bin/activate`) and run `python -m pytest -q`.
 - Tests use temp data dirs; the real files appear after you run the app or write to the store (default `~/.shiye/shiye.db` and `~/.shiye/shiye.faiss`).
 
-Web UI (optional):
+Web UI:
 
-- Run the web server: `uvicorn web:app --reload --port 8000` and open `http://localhost:8000`.
-- Chat, run `/rss`, and add notes/URLs from the browser; messages render as Markdown.
+- Visit `http://localhost:8000` after starting the server.
+- Commands: `/note` (3-panel note mode), `/add` (URLs/notes), `/rss`, `/summarize`, `/clear` (clears on-screen log only).
+- Chat, run `/rss`, toggle `/note` for the markdown note taker, `/add` URLs/notes, `/clear` to clear the on-screen log (does not wipe storage).
+
+## Data model (working)
+
+### Timestamps
+- `created_at` (chunks/documents/messages): when the chunk was stored; normalized to UTC ISO (`YYYY-MM-DDTHH:MM:SS.ssssss+00:00`). If the source lacks tzinfo, it is forced to UTC.
+- `event_at` (optional): when the content actually happened (user-provided or inferred). Stored as UTC ISO; absent when not provided.
+- `ingested_at` (documents): when the document landed in the store (UTC ISO).
+- UI note: the web log shows `created_at`; note editor shows `updated_at` derived from `event_at` or `created_at`.
+
+Extraction/assignment:
+- User input: timestamped at receipt (`created_at=now`).
+- DSPy replies or fallbacks: timestamped at generation (`created_at=now`).
+- `/add` fetches: fetched content gets `created_at/ingested_at=now`; `event_at` unset unless provided.
+- Notes: `created_at` on first save; `event_at` reused as “last changed” and mirrored into tags as `last_changed`.
+
+### Document types in use
+- `chat` (default chat log document).
+- `note` (Markdown notes created via `/note`; images referenced in tags).
+- `web_page` (fetched URL content via `/add fetch ...`).
+- `paper` (arXiv metadata extraction via `/add fetch`).
+- `rss_daily_summary` (daily RSS brief).
+- Future/other: generic `system`/`user_note` chunks live under `chat` unless explicitly stored as a document.
 
 RSS brief (micro-app):
 
@@ -68,20 +87,3 @@ Functions-wise, what's most important to me, for my personal uses:
 ## achitectural considerations
 
 TBD, main components, what to build first
-
-
-## Next bady steps (outdated)
-
-- [x]: refactor the mvp in a more modular layout
-- scope on certain in-context logs by semantic, time cues
-  - [x] modify the log data structure, ask LLM to break down into time atomic pieces
-  - [x] for each piece two time stamps, one for creation, one for event
-  - [ ] pick a benchmark and SOTA on tineline reasoning, maybe https://huggingface.co/papers/2505.12891
-  - [ ] how to test the in context log scoping ?
-- save logs on scoping
-- clear logs on scoping
-- stash away, save and then clear on scoping
-- summarize and then stash, summary in context, logs saved out
-- scope external logs by semantic, time cues
-- load stashed logs back
-- auto stash, summarize, load back

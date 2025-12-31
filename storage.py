@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -134,6 +135,52 @@ class LocalStore:
                 """
             )
 
+    def _maybe_embed(self, texts: Sequence[str]):
+        if self.embedder and self._faiss_index:
+            try:
+                return self.embedder.embed(texts)
+            except Exception as e:
+                print(f"[warn] embedding failed: {e}")
+        return None
+
+    def _write_index_meta(self, cur, now_iso: str) -> None:
+        if not self._faiss_index:
+            return
+        cur.execute(
+            """
+            INSERT INTO vector_index_meta (id, vector_dim, index_type, trained, path, last_sync_ts)
+            VALUES (1, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                vector_dim=excluded.vector_dim,
+                index_type=excluded.index_type,
+                trained=excluded.trained,
+                path=excluded.path,
+                last_sync_ts=excluded.last_sync_ts
+            """,
+            (
+                self._faiss_index.dim if hasattr(self._faiss_index, "dim") else None,
+                "flat",
+                1 if (faiss and self._faiss_index) else 0,
+                str(self._faiss_index.index_path) if self._faiss_index else None,
+                now_iso,
+            ),
+        )
+
+    def _extract_image_refs(self, content: str) -> List[str]:
+        if not content:
+            return []
+        matches = re.findall(r"!\[[^\]]*\]\(([^)]+)\)", content)
+        return [m for m in matches if m]
+
+    def _derive_note_title(self, content: str, provided: Optional[str] = None) -> str:
+        if provided and provided.strip():
+            return provided.strip()
+        for line in content.splitlines():
+            candidate = line.strip().lstrip("#").strip()
+            if candidate:
+                return candidate[:160]
+        return "Untitled note"
+
     def _ensure_default_document(self) -> int:
         with self._connect() as conn:
             cur = conn.cursor()
@@ -198,13 +245,7 @@ class LocalStore:
         ids: List[int] = []
         if not messages:
             return ids
-        embeddings = None
-        if self.embedder and self._faiss_index:
-            try:
-                embeddings = self.embedder.embed(m.content for m in messages)
-            except Exception as e:
-                print(f"[warn] embedding failed: {e}")
-                embeddings = None
+        embeddings = self._maybe_embed([m.content for m in messages])
         doc_id = self.default_doc_id
         if document_meta:
             try:
@@ -218,6 +259,7 @@ class LocalStore:
                 embedding_id = None
                 if embeddings is not None:
                     embedding_id = None  # filled after chunk id known
+                created_at = ensure_utc(msg.created_at) or datetime.now(UTC)
                 cur.execute(
                     """
                     INSERT INTO chunks (document_id, seq, text, role, token_count, embedding_id, created_at, event_at, tags, focus_hint)
@@ -230,7 +272,7 @@ class LocalStore:
                         msg.role.value,
                         None,
                         None,
-                        ensure_utc(msg.created_at).isoformat(),
+                        created_at.isoformat(),
                         ensure_utc(msg.reference_time).isoformat() if msg.reference_time else None,
                         json.dumps(msg.metadata) if msg.metadata else None,
                         msg.metadata.get("focus_hint") if msg.metadata else None,
@@ -248,25 +290,7 @@ class LocalStore:
                     if self._faiss_index:
                         self._faiss_index.add([embedding_id], emb_vec)
             if self._faiss_index:
-                cur.execute(
-                    """
-                    INSERT INTO vector_index_meta (id, vector_dim, index_type, trained, path, last_sync_ts)
-                    VALUES (1, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        vector_dim=excluded.vector_dim,
-                        index_type=excluded.index_type,
-                        trained=excluded.trained,
-                        path=excluded.path,
-                        last_sync_ts=excluded.last_sync_ts
-                    """,
-                    (
-                        self._faiss_index.dim if hasattr(self._faiss_index, "dim") else None,
-                        "flat",
-                        1 if (faiss and self._faiss_index) else 0,
-                        str(self._faiss_index.index_path) if self._faiss_index else None,
-                        now_iso,
-                    ),
-                )
+                self._write_index_meta(cur, now_iso)
         return ids
 
     def list_recent(self, n: int = 20) -> List[Message]:
@@ -324,6 +348,188 @@ class LocalStore:
             )
             row = cur.fetchone()
         return self._row_to_message(row) if row else None
+
+    def save_note(self, content: str, title: Optional[str] = None, note_id: Optional[int] = None) -> Optional[dict]:
+        now = datetime.now(UTC)
+        now_iso = ensure_utc(now).isoformat()
+        title = self._derive_note_title(content, provided=title)
+        images = self._extract_image_refs(content)
+        base_tags = {"note_type": "markdown", "last_changed": now_iso}
+        if images:
+            base_tags["images"] = images
+        embeddings = self._maybe_embed([content])
+        with self._connect() as conn:
+            cur = conn.cursor()
+            if note_id:
+                cur.execute("SELECT * FROM documents WHERE id = ? AND doc_type = 'note'", (note_id,))
+                doc_row = cur.fetchone()
+                if not doc_row:
+                    return None
+                cur.execute(
+                    "UPDATE documents SET title = ?, event_at = ?, tags = ? WHERE id = ?",
+                    (title, now_iso, json.dumps(base_tags | {"note_title": title}), note_id),
+                )
+                cur.execute(
+                    """
+                    SELECT * FROM chunks
+                    WHERE document_id = ? AND deleted = 0
+                    ORDER BY seq ASC
+                    LIMIT 1
+                    """,
+                    (note_id,),
+                )
+                chunk_row = cur.fetchone()
+                chunk_id = chunk_row["id"] if chunk_row else None
+                chunk_tags = base_tags | {"note_id": note_id, "note_title": title}
+                tags_json = json.dumps(chunk_tags)
+                if chunk_id:
+                    cur.execute(
+                        """
+                        UPDATE chunks
+                        SET text = ?, event_at = ?, tags = ?
+                        WHERE id = ?
+                        """,
+                        (content, now_iso, tags_json, chunk_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO chunks (document_id, seq, text, role, token_count, embedding_id, created_at, event_at, tags, focus_hint)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            note_id,
+                            0,
+                            content,
+                            Role.USER.value,
+                            None,
+                            None,
+                            now_iso,
+                            now_iso,
+                            tags_json,
+                            None,
+                        ),
+                    )
+                    chunk_id = cur.lastrowid
+                created_at = doc_row["created_at"] or now_iso
+            else:
+                doc_id = self._insert_document(
+                    {
+                        "doc_type": "note",
+                        "title": title,
+                        "source": "note",
+                        "created_at": now_iso,
+                        "event_at": now_iso,
+                        "ingested_at": now_iso,
+                        "tags": base_tags | {"note_title": title},
+                    }
+                )
+                chunk_tags = base_tags | {"note_id": doc_id, "note_title": title}
+                tags_json = json.dumps(chunk_tags)
+                cur.execute(
+                    """
+                    INSERT INTO chunks (document_id, seq, text, role, token_count, embedding_id, created_at, event_at, tags, focus_hint)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        doc_id,
+                        0,
+                        content,
+                        Role.USER.value,
+                        None,
+                        None,
+                        now_iso,
+                        now_iso,
+                        tags_json,
+                        None,
+                    ),
+                )
+                chunk_id = cur.lastrowid
+                note_id = doc_id
+                created_at = now_iso
+            if embeddings is not None and self._faiss_index:
+                emb_vec = embeddings[:1]
+                try:
+                    selector = faiss.IDSelectorBatch(np.array([chunk_id], dtype="int64"))
+                    self._faiss_index.index.remove_ids(selector)
+                except Exception:
+                    # ok to continue; add will overwrite
+                    pass
+                self._faiss_index.add([chunk_id], emb_vec)
+                cur.execute(
+                    "UPDATE chunks SET embedding_id = ? WHERE id = ?",
+                    (chunk_id, chunk_id),
+                )
+                self._write_index_meta(cur, now_iso)
+        return {
+            "id": note_id,
+            "title": title,
+            "content": content,
+            "created_at": ensure_utc(datetime.fromisoformat(created_at)).isoformat() if created_at else now_iso,
+            "updated_at": now_iso,
+            "images": images,
+        }
+
+    def list_notes(self, limit: int = 50) -> List[dict]:
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT * FROM documents
+                WHERE doc_type = 'note'
+                ORDER BY datetime(COALESCE(event_at, created_at)) DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+        notes: List[dict] = []
+        for row in rows:
+            tags = json.loads(row["tags"]) if row["tags"] else {}
+            updated_at = row["event_at"] or row["created_at"]
+            notes.append(
+                {
+                    "id": row["id"],
+                    "title": row["title"] or tags.get("note_title") or "Untitled note",
+                    "created_at": ensure_utc(datetime.fromisoformat(row["created_at"])).isoformat()
+                    if row["created_at"]
+                    else None,
+                    "updated_at": ensure_utc(datetime.fromisoformat(updated_at)).isoformat() if updated_at else None,
+                    "tags": tags,
+                }
+            )
+        return notes
+
+    def get_note(self, note_id: int) -> Optional[dict]:
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM documents WHERE id = ? AND doc_type = 'note'", (note_id,))
+            doc_row = cur.fetchone()
+            if not doc_row:
+                return None
+            cur.execute(
+                """
+                SELECT * FROM chunks
+                WHERE document_id = ? AND deleted = 0
+                ORDER BY seq ASC
+                LIMIT 1
+                """,
+                (note_id,),
+            )
+            chunk_row = cur.fetchone()
+        tags = json.loads(doc_row["tags"]) if doc_row["tags"] else {}
+        updated_at = doc_row["event_at"] or doc_row["created_at"]
+        images = tags.get("images") or []
+        return {
+            "id": note_id,
+            "title": doc_row["title"] or tags.get("note_title") or "Untitled note",
+            "content": chunk_row["text"] if chunk_row else "",
+            "created_at": ensure_utc(datetime.fromisoformat(doc_row["created_at"])).isoformat()
+            if doc_row["created_at"]
+            else None,
+            "updated_at": ensure_utc(datetime.fromisoformat(updated_at)).isoformat() if updated_at else None,
+            "images": images,
+        }
 
     def _get_chunk_by_id(self, chunk_id: int) -> Optional[Message]:
         with self._connect() as conn:

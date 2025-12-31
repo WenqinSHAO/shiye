@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import List, Optional
 
 from datatypes import Message
@@ -12,6 +13,8 @@ class MemoryWorkspace:
 
     max_items: int = 500  # legacy cap for in-memory fallback
     _fallback_items: List[Message] = field(default_factory=list)
+    _fallback_notes: List[dict] = field(default_factory=list)
+    _note_counter: int = 0
     store: Optional[LocalStore] = None
 
     def __post_init__(self) -> None:
@@ -74,4 +77,60 @@ class MemoryWorkspace:
                 del self._fallback_items[idx]
                 return True
         return False
+
+    def save_note(self, content: str, title: Optional[str] = None, note_id: Optional[int] = None) -> Optional[dict]:
+        if self.store:
+            return self.store.save_note(content, title=title, note_id=note_id)
+        derived_title = (title or "").strip()
+        if not derived_title:
+            for line in content.splitlines():
+                candidate = line.strip().lstrip("#").strip()
+                if candidate:
+                    derived_title = candidate
+                    break
+        derived_title = derived_title or "Untitled note"
+        now_iso = datetime.now(UTC).isoformat()
+        images = []
+        if "!(" in content:
+            import re as _re  # local import to avoid top-level dependency when unused
+            images = [m for m in _re.findall(r"!\[[^\]]*\]\(([^)]+)\)", content) if m]
+        if note_id:
+            for note in self._fallback_notes:
+                if note["id"] == note_id:
+                    note.update(
+                        {
+                            "title": derived_title,
+                            "content": content,
+                            "updated_at": now_iso,
+                            "images": images,
+                        }
+                    )
+                    return note
+            return None
+        self._note_counter += 1
+        note = {
+            "id": self._note_counter,
+            "title": derived_title,
+            "content": content,
+            "created_at": now_iso,
+            "updated_at": now_iso,
+            "images": images,
+        }
+        self._fallback_notes.append(note)
+        return note
+
+    def list_notes(self, limit: int = 50) -> List[dict]:
+        if self.store:
+            return self.store.list_notes(limit=limit)
+        return sorted(self._fallback_notes, key=lambda n: n.get("updated_at") or n.get("created_at"), reverse=True)[
+            :limit
+        ]
+
+    def get_note(self, note_id: int) -> Optional[dict]:
+        if self.store:
+            return self.store.get_note(note_id)
+        for note in self._fallback_notes:
+            if note["id"] == note_id:
+                return note
+        return None
   

@@ -39,7 +39,7 @@ class MemoryApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        yield Hint("Commands: /help, /add, /recall, /list, /summarize, /clear, /rss — otherwise chat with the assistant.")
+        yield Hint("Commands: /help, /add, /summarize, /clear, /rss — otherwise chat with the assistant.")
         self.log_view = RichLog(wrap=True, name="log")
         yield self.log_view
         yield Static("Type a message or /help … then press Ctrl+S to send", classes="input-hint")
@@ -104,8 +104,6 @@ class MemoryApp(App):
                 Commands:
                   /help            Show this help
                   /add <text>      Add <text> to memory
-                  /recall <query>  Recall most recent memory containing <query>
-                  /list            Show the last 20 memory items
                   /summarize       Summarize current memory (DSPy if configured; else local)
                   /clear           Clear all memory
                   /rss             Fetch configured RSS feeds and summarize
@@ -122,26 +120,6 @@ class MemoryApp(App):
                 self.log_view.write(line)
             return
 
-        if cmd == "/recall":
-            if not arg:
-                self.log_view.write("usage: /recall <query>")
-                return
-            hit = self.ws.recall(arg)
-            if hit:
-                self.log_view.write(hit.to_text())
-            else:
-                self.log_view.write("[recall] no match")
-            return
-
-        if cmd == "/list":
-            items = self.ws.list_recent(20)
-            if not items:
-                self.log_view.write("[list] memory is empty")
-                return
-            for i, it in enumerate(items, 1):
-                self.log_view.write(f"[{i:02d}] {it.to_text()}")
-            return
-
         if cmd == "/summarize":
             summary = self.orch.summarize()
             if isinstance(summary, list):
@@ -152,8 +130,8 @@ class MemoryApp(App):
             return
 
         if cmd == "/clear":
-            self.ws.clear()
-            self.log_view.write("[ok] memory cleared")
+            self.log_view.clear()
+            self.log_view.write("[ok] UI cleared (storage unchanged)")
             return
 
         if cmd == "/rss":

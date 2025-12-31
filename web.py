@@ -1,7 +1,10 @@
 from typing import List
+from pathlib import Path
+import secrets
 
-from fastapi import Body, FastAPI
+from fastapi import Body, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from datetime import UTC, datetime
 
 from datatypes import Message, ensure_utc
@@ -14,6 +17,11 @@ app = FastAPI(title="Shiye Web")
 
 workspace = MemoryWorkspace()
 orchestrator = Orchestrator(workspace)
+BASE_DIR = Path(__file__).resolve().parent
+ASSETS_DIR = BASE_DIR / "assets"
+IMAGES_DIR = ASSETS_DIR / "img"
+IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
 
 
 def msg_to_dict(m: Message) -> dict:
@@ -37,6 +45,19 @@ def make_system_msg(content: str) -> dict:
     }
 
 
+def note_dict(note: dict) -> dict:
+    if not note:
+        return {}
+    return {
+        "id": note.get("id"),
+        "title": note.get("title"),
+        "content": note.get("content", ""),
+        "created_at": note.get("created_at"),
+        "updated_at": note.get("updated_at"),
+        "images": note.get("images") or [],
+    }
+
+
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
     html = """
@@ -46,6 +67,16 @@ def index() -> HTMLResponse:
         <meta charset="utf-8" />
         <title>Shiye</title>
         <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+        <script>
+            window.MathJax = {
+                tex: {
+                    inlineMath: [['$', '$'], ['\\\\(', '\\\\)']],
+                    displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']]
+                },
+                options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'] }
+            };
+        </script>
+        <script id="mathjax-script" defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
         <style>
             :root {
                 --bg: #f6f8fb;
@@ -68,6 +99,10 @@ def index() -> HTMLResponse:
             header { padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 10; }
             main { display: grid; grid-template-columns: 1fr; gap: 12px; padding: 12px 16px; height: calc(100vh - 64px); box-sizing: border-box; overflow: hidden; }
             body.show-history main { grid-template-columns: 2fr auto; }
+            body.note-mode main { grid-template-columns: 1fr; }
+            body.note-mode section.chat, body.note-mode #history-wrapper { display: none; }
+            #note-shell { display: none; height: 100%; min-height: 0; grid-template-columns: 260px 1.6fr 1.2fr; gap: 12px; }
+            body.note-mode #note-shell { display: grid; }
             main section.chat { display: grid; grid-template-rows: 1fr auto; min-height: 0; height: 100%; min-width: 0; overflow: hidden; }
             #log { padding: 16px; height: 100%; min-height: 0; overflow-y: auto; background: linear-gradient(180deg, #fafdff 0%, var(--bg) 100%); border-radius: 12px; border: 1px solid var(--border); box-sizing: border-box; }
             .msg { margin-bottom: 12px; position: relative; padding-right: 90px; }
@@ -80,8 +115,11 @@ def index() -> HTMLResponse:
             .msg:hover .actions { opacity: 1; }
             .actions button { font-size: 11px; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--action-border); background: var(--action-bg); color: var(--ink); cursor: pointer; }
             .actions button:disabled { opacity: 0.4; cursor: not-allowed; }
-            form { padding: 12px 16px; background: var(--panel); border-top: 1px solid var(--border); display: grid; gap: 8px; position: static; }
-            textarea { width: 100%; min-height: 90px; resize: vertical; border-radius: 10px; border: 1px solid var(--border); background: #fff; color: var(--ink); padding: 10px; }
+            form { padding: 12px 16px; background: var(--panel); border-top: 1px solid var(--border); display: grid; gap: 8px; position: static; border-radius: 12px; box-shadow: 0 2px 8px rgba(15, 23, 42, 0.05); }
+            .input-wrap { position: relative; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: #fff; }
+            textarea { width: 100%; min-height: 110px; resize: vertical; border: none; background: transparent; color: var(--ink); padding: 14px 14px 48px 14px; box-sizing: border-box; display: block; }
+            .input-footer { position: absolute; left: 0; right: 0; bottom: 0; display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-top: 1px solid var(--border); background: linear-gradient(180deg, rgba(255,255,255,0.94), #f7f9ff); }
+            .input-footer span { font-size: 12px; color: var(--subtle); }
             button { border: none; border-radius: 10px; padding: 10px 14px; cursor: pointer; font-weight: 600; color: #fff; background: var(--accent); box-shadow: 0 2px 6px rgba(91, 141, 239, 0.35); }
             button.secondary { background: #5fc49e; box-shadow: 0 2px 6px rgba(95, 196, 158, 0.35); }
             button.ghost { background: var(--panel); color: var(--ink); border: 1px solid var(--border); box-shadow: none; }
@@ -104,16 +142,52 @@ def index() -> HTMLResponse:
             #history-list .item .role { margin: 0 0 4px 0; }
             #history-list .item .actions { position: absolute; right: 6px; top: 6px; display: inline-flex; gap: 4px; opacity: 0; transition: opacity 0.15s ease; }
             #history-list .item:hover .actions { opacity: 1; }
+            .note-panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 2px 8px rgba(15, 23, 42, 0.05); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+            .note-list-header, .note-editor-header, .note-preview-header { padding: 12px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+            .note-subtle { font-size: 12px; color: var(--subtle); }
+            .note-pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 4px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--ink); }
+            .note-pill.subtle { background: #f0f4ff; color: var(--subtle); }
+            .note-list-body { padding: 10px; overflow-y: auto; flex: 1; background: #f9fbff; }
+            .note-item { padding: 10px 12px; border-radius: 10px; border: 1px solid transparent; cursor: pointer; margin-bottom: 8px; transition: border-color 0.12s ease, background 0.12s ease; }
+            .note-item:hover { border-color: var(--border); background: #fff; }
+            .note-item.active { border-color: var(--accent); background: var(--accent-soft); }
+            .note-item .title { font-weight: 600; margin-bottom: 4px; white-space: nowrap; overflow: hidden; }
+            .note-item .meta { font-size: 12px; color: var(--subtle); }
+            .note-editor-body { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+            #note-input { width: 100%; height: 100%; border: none; outline: none; padding: 16px; padding-bottom: 140px; font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace; font-size: 14px; resize: none; background: #fdfdff; color: var(--ink); border-bottom-left-radius: 12px; border-bottom-right-radius: 12px; box-sizing: border-box; overflow: auto; scroll-padding-bottom: 140px; }
+            #note-preview { padding: 16px; overflow-y: auto; flex: 1; background: linear-gradient(180deg, #fff, #f7f9ff); }
+            #note-preview h1, #note-preview h2, #note-preview h3 { margin-top: 0; }
+            #note-preview img { max-width: 100%; border-radius: 10px; border: 1px solid var(--border); }
+            .note-title { font-weight: 600; color: var(--ink); }
+            .note-actions { display: inline-flex; gap: 8px; align-items: center; }
+            .note-exit { display: none; }
+            body.note-mode .note-exit { display: inline-flex; }
+            .history-body { position: relative; }
+            .history-body.collapsed { max-height: 140px; overflow: hidden; }
+            .history-body.collapsed::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 32px; background: linear-gradient(180deg, transparent, #fff); }
+            .history-expand { margin-top: 6px; font-size: 11px; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel); cursor: pointer; }
+            .command-strip { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--subtle); }
+            .command-pill { padding: 4px 8px; border-radius: 999px; border: 1px solid var(--border); background: #f3f6fb; color: var(--ink); font-weight: 600; }
         </style>
     </head>
     <body>
         <header>
-            <div><strong>Shiye</strong> — Web UI</div>
+            <div style="display:flex;flex-direction:column;gap:4px;">
+                <div><strong>Shiye</strong> — Your personal knowledge base</div>
+                <div class="command-strip">
+                    <span class="command-pill">/note</span>
+                    <span class="command-pill">/add</span>
+                    <span class="command-pill">/rss</span>
+                    <span class="command-pill">/summarize</span>
+                    <span class="command-pill">/clear (UI only)</span>
+                </div>
+            </div>
             <div class="row">
                 <label style="display:flex;align-items:center;gap:6px;color:#4b5563;font-size:12px;">
                     <input type="checkbox" id="debugToggle" onclick="toggleDebug()" />
                     debug
                 </label>
+                <button id="noteBackBtn" type="button" class="ghost note-exit" onclick="exitNoteMode()">Back to chat</button>
                 <button id="historyBtn" type="button" class="ghost" onclick="toggleHistory()">History</button>
             </div>
         </header>
@@ -121,12 +195,52 @@ def index() -> HTMLResponse:
             <section class="chat">
                 <div id="log"></div>
                 <form onsubmit="event.preventDefault(); sendChat();">
-                    <textarea id="input" placeholder="Type a message... (slash commands supported)"></textarea>
-                    <div class="row" style="justify-content:flex-end;">
-                        <span style="flex:1;color:var(--subtle);font-size:12px;">Ctrl+Enter to send</span>
-                        <button type="submit">Send</button>
+                    <div class="input-wrap">
+                        <textarea id="input" placeholder="Type a message... (slash commands supported)"></textarea>
+                        <div class="input-footer">
+                            <span id="sendStatus">Ctrl+Enter to send</span>
+                            <div style="flex:1;"></div>
+                            <button id="sendBtn" type="submit">Send</button>
+                        </div>
                     </div>
                 </form>
+            </section>
+            <section id="note-shell" aria-label="note mode">
+                <div class="note-panel note-list-panel">
+                    <div class="note-list-header">
+                        <div>
+                            <div style="font-weight:700;">Notebook</div>
+                            <div id="noteStatus" class="note-subtle">Capture Markdown notes with previews.</div>
+                        </div>
+                        <div class="note-actions">
+                            <button type="button" class="ghost" onclick="refreshNotes()">Refresh</button>
+                            <button type="button" class="secondary" onclick="newNote()">New</button>
+                        </div>
+                    </div>
+                    <div class="note-list-body" id="note-list"></div>
+                </div>
+                <div class="note-panel note-editor-panel">
+                    <div class="note-editor-header">
+                        <div>
+                            <div class="note-pill">Editor</div>
+                            <div id="note-updated" class="note-subtle"></div>
+                        </div>
+                        <div class="note-actions">
+                            <span id="note-dirty" class="note-pill subtle" style="display:none;">Unsaved</span>
+                            <button id="saveNoteBtn" type="button" class="ghost" onclick="saveActiveNote()">Save</button>
+                        </div>
+                    </div>
+                    <div class="note-editor-body">
+                        <textarea id="note-input" placeholder="Markdown note... Paste images to attach."></textarea>
+                    </div>
+                </div>
+                <div class="note-panel note-preview-panel">
+                    <div class="note-preview-header">
+                        <div class="note-pill">Preview</div>
+                        <div id="note-title-display" class="note-title"></div>
+                    </div>
+                    <div id="note-preview"></div>
+                </div>
             </section>
             <aside id="history-wrapper">
                 <div id="history-resize"></div>
@@ -142,14 +256,301 @@ def index() -> HTMLResponse:
         <script>
             const logEl = document.getElementById('log');
             const inputEl = document.getElementById('input');
+            const sendBtn = document.getElementById('sendBtn');
+            const sendStatus = document.getElementById('sendStatus');
             const debugToggle = document.getElementById('debugToggle');
             const historyBtn = document.getElementById('historyBtn');
             const historyList = document.getElementById('history-list');
             const historyWrapper = document.getElementById('history-wrapper');
             const historyPanel = document.getElementById('history-panel');
             const historyResize = document.getElementById('history-resize');
+            const noteShell = document.getElementById('note-shell');
+            const noteList = document.getElementById('note-list');
+            const noteInput = document.getElementById('note-input');
+            const notePreview = document.getElementById('note-preview');
+            const noteTitleDisplay = document.getElementById('note-title-display');
+            const noteUpdated = document.getElementById('note-updated');
+            const noteDirty = document.getElementById('note-dirty');
+            const noteStatus = document.getElementById('noteStatus');
+            const mathScript = document.getElementById('mathjax-script');
+            let mathQueue = [];
             let historyOpen = false;
             let isResizing = false;
+            let noteMode = false;
+            let activeNoteId = null;
+            let noteChanged = false;
+            let noteCache = [];
+            let notesLoadedOnce = false;
+            let sending = false;
+
+            function deriveNoteTitle(text) {
+                if (!text) return "Untitled note";
+                const lines = text.split("\\n");
+                for (const line of lines) {
+                    const trimmed = line.trim().replace(/^#+\\s*/, "");
+                    if (trimmed) return trimmed.slice(0, 160);
+                }
+                return "Untitled note";
+            }
+
+            function typesetMath(el) {
+                if (!el) return;
+                if (typeof MathJax !== 'undefined' && MathJax.typesetPromise) {
+                    MathJax.typesetPromise([el]).catch((e) => console.warn("mathjax render failed", e));
+                } else {
+                    mathQueue.push(el);
+                }
+            }
+
+            function flushMathQueue() {
+                if (!mathQueue.length) return;
+                if (typeof MathJax !== 'undefined' && MathJax.typesetPromise) {
+                    const unique = Array.from(new Set(mathQueue));
+                    mathQueue = [];
+                    MathJax.typesetPromise(unique).catch((e) => console.warn("mathjax queued render failed", e));
+                }
+            }
+
+            function formatNoteListTitle(title) {
+                const full = title || "Untitled note";
+                const maxLen = 42;
+                if (full.length <= maxLen) return full;
+                return full.slice(0, maxLen - 6).trimEnd() + " [...]";
+            }
+
+            function markNoteDirty(on) {
+                noteChanged = on;
+                if (noteDirty) noteDirty.style.display = on ? "inline-flex" : "none";
+            }
+
+            function setSending(on) {
+                sending = on;
+                if (sendBtn) {
+                    sendBtn.disabled = on;
+                    sendBtn.textContent = on ? "Waiting..." : "Send";
+                }
+                if (sendStatus) {
+                    if (on) {
+                        sendStatus.textContent = "Waiting for response...";
+                        sendStatus.style.color = "#dc2626";
+                    } else {
+                        sendStatus.textContent = "Ctrl+Enter to send";
+                        sendStatus.style.color = "var(--subtle)";
+                    }
+                }
+            }
+
+            function renderNotePreview() {
+                if (!notePreview) return;
+                const text = noteInput ? noteInput.value : "";
+                notePreview.innerHTML = text ? marked.parse(text) : '<div class="note-subtle">Nothing to preview yet.</div>';
+                if (noteTitleDisplay) noteTitleDisplay.textContent = deriveNoteTitle(text);
+                typesetMath(notePreview);
+            }
+
+            async function refreshNotes(autoSelect = true) {
+                try {
+                    const res = await fetch("/api/notes");
+                    const data = await res.json();
+                    noteCache = data.notes || [];
+                    notesLoadedOnce = true;
+                    renderNotesList(noteCache);
+                    if (noteStatus) {
+                        noteStatus.textContent = noteCache.length ? `${noteCache.length} stored note(s)` : "No notes yet — start with a new one.";
+                    }
+                    if (autoSelect) {
+                        if (activeNoteId && noteCache.some(n => n.id === activeNoteId)) return;
+                        if (noteCache.length) {
+                            await loadNote(noteCache[0].id);
+                        } else {
+                            newNote();
+                        }
+                    }
+                } catch (e) {
+                    console.warn("Failed to load notes", e);
+                }
+            }
+
+            function renderNotesList(notes) {
+                if (!noteList) return;
+                noteList.innerHTML = "";
+                if (!notes || !notes.length) {
+                    const empty = document.createElement("div");
+                    empty.className = "note-subtle";
+                    empty.textContent = "No notes yet.";
+                    noteList.appendChild(empty);
+                    return;
+                }
+                notes.forEach(n => {
+                    const item = document.createElement("div");
+                    item.className = "note-item" + (n.id === activeNoteId ? " active" : "");
+                    const title = document.createElement("div");
+                    title.className = "title";
+                    const display = formatNoteListTitle(n.title || "Untitled note");
+                    title.textContent = display;
+                    title.title = n.title || "Untitled note";
+                    const meta = document.createElement("div");
+                    meta.className = "meta";
+                    const updated = n.updated_at ? new Date(n.updated_at).toLocaleString() : "";
+                    meta.textContent = updated ? `Updated ${updated}` : "Draft";
+                    item.appendChild(title);
+                    item.appendChild(meta);
+                    item.onclick = () => selectNote(n.id);
+                    noteList.appendChild(item);
+                });
+            }
+
+            async function loadNote(noteId) {
+                if (!noteId) return;
+                try {
+                    const res = await fetch(`/api/notes/${noteId}`);
+                    if (!res.ok) return;
+                    const data = await res.json();
+                    const note = data.note;
+                    activeNoteId = note.id;
+                    if (noteInput) noteInput.value = note.content || "";
+                    markNoteDirty(false);
+                    renderNotePreview();
+                    if (noteUpdated) {
+                        const ts = note.updated_at ? new Date(note.updated_at).toLocaleString() : "";
+                        noteUpdated.textContent = ts ? `Last saved ${ts}` : "";
+                    }
+                    renderNotesList(noteCache);
+                } catch (e) {
+                    console.warn("Failed to load note", e);
+                }
+            }
+
+            async function saveActiveNote() {
+                if (!noteInput) return null;
+                const content = noteInput.value || "";
+                if (!content.trim() && !activeNoteId) {
+                    markNoteDirty(false);
+                    return null;
+                }
+                const payload = { content, title: deriveNoteTitle(content) };
+                const url = activeNoteId ? `/api/notes/${activeNoteId}` : "/api/notes";
+                const method = activeNoteId ? "PUT" : "POST";
+                try {
+                    const res = await fetch(url, {
+                        method,
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(payload),
+                    });
+                    if (!res.ok) throw new Error(`save failed (${res.status})`);
+                    const data = await res.json();
+                    const note = data.note;
+                    activeNoteId = note.id;
+                    markNoteDirty(false);
+                    if (noteUpdated) {
+                        const ts = note.updated_at ? new Date(note.updated_at).toLocaleString() : "";
+                        noteUpdated.textContent = ts ? `Last saved ${ts}` : "";
+                    }
+                    await refreshNotes(false);
+                    return note;
+                } catch (e) {
+                    console.warn("Failed to save note", e);
+                    if (noteStatus) noteStatus.textContent = "Save failed — try again.";
+                    return null;
+                }
+            }
+
+            async function maybeSaveActiveNote() {
+                if (noteChanged) {
+                    return await saveActiveNote();
+                }
+                return null;
+            }
+
+            async function selectNote(noteId) {
+                if (noteId === activeNoteId) return;
+                await maybeSaveActiveNote();
+                await loadNote(noteId);
+            }
+
+            function newNote() {
+                activeNoteId = null;
+                if (noteInput) {
+                    noteInput.value = "";
+                    noteInput.focus();
+                }
+                markNoteDirty(false);
+                renderNotePreview();
+                if (noteUpdated) noteUpdated.textContent = "Draft note — not saved yet.";
+                renderNotesList(noteCache);
+            }
+
+            async function enterNoteMode() {
+                noteMode = true;
+                document.body.classList.add("note-mode");
+                document.body.classList.remove("show-history");
+                historyOpen = false;
+                if (historyBtn) {
+                    historyBtn.textContent = "History";
+                    historyBtn.disabled = true;
+                }
+                if (!notesLoadedOnce) {
+                    await refreshNotes();
+                } else {
+                    await refreshNotes(false);
+                    if (activeNoteId) {
+                        await loadNote(activeNoteId);
+                    } else if (noteCache.length) {
+                        await loadNote(noteCache[0].id);
+                    }
+                }
+                if (noteInput) noteInput.focus();
+                flushMathQueue();
+            }
+
+            async function exitNoteMode() {
+                await maybeSaveActiveNote();
+                noteMode = false;
+                document.body.classList.remove("note-mode");
+                if (historyBtn) {
+                    historyBtn.disabled = false;
+                }
+            }
+
+            async function uploadImage(file) {
+                const form = new FormData();
+                form.append("file", file, file.name || "pasted-image");
+                const res = await fetch("/api/note_assets", { method: "POST", body: form });
+                if (!res.ok) return null;
+                const data = await res.json();
+                return data.path;
+            }
+
+            async function handleNotePaste(event) {
+                if (!event.clipboardData) return;
+                const items = event.clipboardData.items || [];
+                for (const item of items) {
+                    if (item.kind === "file") {
+                        const file = item.getAsFile();
+                        if (file && file.type && file.type.startsWith("image/")) {
+                            event.preventDefault();
+                            const path = await uploadImage(file);
+                            if (path) {
+                                insertAtCursor(noteInput, `![pasted image](${path})\\n`);
+                                renderNotePreview();
+                                markNoteDirty(true);
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+
+            function insertAtCursor(textarea, text) {
+                if (!textarea) return;
+                const start = textarea.selectionStart || 0;
+                const end = textarea.selectionEnd || 0;
+                const before = textarea.value.substring(0, start);
+                const after = textarea.value.substring(end);
+                textarea.value = before + text + after;
+                const pos = start + text.length;
+                textarea.selectionStart = textarea.selectionEnd = pos;
+            }
 
             function renderMessage(role, content, chunkId, createdAt, debug, metadata) {
                 const wrap = document.createElement('div');
@@ -219,17 +620,37 @@ def index() -> HTMLResponse:
             }
 
             async function sendChat() {
+                if (sending) return;
                 const text = inputEl.value.trim();
                 if (!text) return;
+                if (text === '/note') {
+                    inputEl.value = '';
+                    await enterNoteMode();
+                    return;
+                }
+                if (text === '/clear') {
+                    if (logEl) logEl.innerHTML = '';
+                    inputEl.value = '';
+                    setSending(false);
+                    return;
+                }
                 renderMessage('user', text, null, new Date().toISOString());
                 inputEl.value = '';
-                const res = await fetch('/api/chat', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ text, debug: debugToggle.checked })
-                });
-                const data = await res.json();
-                (data.messages || []).forEach(m => renderMessage(m.role, m.content, m.chunk_id, m.created_at, m.debug, m.metadata));
+                setSending(true);
+                try {
+                    const res = await fetch('/api/chat', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ text, debug: debugToggle.checked })
+                    });
+                    const data = await res.json();
+                    (data.messages || []).forEach(m => renderMessage(m.role, m.content, m.chunk_id, m.created_at, m.debug, m.metadata));
+                } catch (e) {
+                    console.warn('chat failed', e);
+                } finally {
+                    setSending(false);
+                    if (inputEl) inputEl.focus();
+                }
             }
 
             async function loadHistory() {
@@ -253,6 +674,7 @@ def index() -> HTMLResponse:
                         roleEl.className = 'role';
                         roleEl.textContent = `${m.role} • ${ts}`;
                         const body = document.createElement('div');
+                        body.className = 'history-body';
                         body.innerHTML = marked.parse(m.content || '');
                         const actions = document.createElement('div');
                         actions.className = 'actions';
@@ -269,6 +691,18 @@ def index() -> HTMLResponse:
                         item.appendChild(actions);
                         item.appendChild(roleEl);
                         item.appendChild(body);
+                        const shouldCollapse = (m.content || '').length > 360 || (body.textContent || '').length > 360;
+                        if (shouldCollapse) {
+                            body.classList.add('collapsed');
+                            const toggle = document.createElement('button');
+                            toggle.className = 'history-expand';
+                            toggle.textContent = 'Expand';
+                            toggle.onclick = () => {
+                                const collapsed = body.classList.toggle('collapsed');
+                                toggle.textContent = collapsed ? 'Expand' : 'Collapse';
+                            };
+                            item.appendChild(toggle);
+                        }
                         historyList.appendChild(item);
                     });
                 } else {
@@ -283,6 +717,7 @@ def index() -> HTMLResponse:
             }
 
             function toggleHistory() {
+                if (noteMode) return;
                 historyOpen = !historyOpen;
                 document.body.classList.toggle('show-history', historyOpen);
                 if (historyOpen) {
@@ -318,9 +753,35 @@ def index() -> HTMLResponse:
                 window.addEventListener('mousemove', onResize);
                 window.addEventListener('mouseup', stopResize);
             }
+            document.body.classList.remove('show-history');
+
+            if (noteInput) {
+                noteInput.addEventListener('input', () => {
+                    markNoteDirty(true);
+                    renderNotePreview();
+                });
+                noteInput.addEventListener('paste', handleNotePaste);
+                noteInput.addEventListener('keydown', (e) => {
+                    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                        e.preventDefault();
+                        saveActiveNote();
+                    }
+                });
+            }
+            if (mathScript) {
+                mathScript.addEventListener('load', flushMathQueue);
+            }
+            renderNotePreview();
+            flushMathQueue();
+            setSending(false);
 
             document.addEventListener('keydown', (e) => {
+                if (noteMode) return;
                 if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                    if (sending) {
+                        e.preventDefault();
+                        return;
+                    }
                     e.preventDefault();
                     sendChat();
                 }
@@ -330,6 +791,57 @@ def index() -> HTMLResponse:
     </html>
     """
     return HTMLResponse(content=html)
+
+
+@app.get("/api/notes")
+def api_list_notes(limit: int = 50) -> dict:
+    notes = workspace.list_notes(limit=limit)
+    return {"notes": [note_dict(n) for n in notes]}
+
+
+@app.get("/api/notes/{note_id}")
+def api_get_note(note_id: int) -> dict:
+    note = workspace.get_note(note_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="note not found")
+    return {"note": note_dict(note)}
+
+
+@app.post("/api/notes")
+def api_create_note(payload=Body(...)) -> dict:
+    content = (payload or {}).get("content", "")
+    title = (payload or {}).get("title")
+    note = workspace.save_note(content or "", title=title)
+    if not note:
+        raise HTTPException(status_code=500, detail="failed to save note")
+    return {"note": note_dict(note)}
+
+
+@app.put("/api/notes/{note_id}")
+def api_update_note(note_id: int, payload=Body(...)) -> dict:
+    content = (payload or {}).get("content", "")
+    title = (payload or {}).get("title")
+    note = workspace.save_note(content or "", title=title, note_id=note_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="note not found")
+    return {"note": note_dict(note)}
+
+
+@app.post("/api/note_assets")
+async def upload_note_asset(file: UploadFile = File(...)) -> dict:
+    if not file:
+        raise HTTPException(status_code=400, detail="missing file")
+    suffix = Path(file.filename or "").suffix or ".bin"
+    safe_suffix = suffix if suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp"} else ".bin"
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="empty file")
+    fname = f"{int(datetime.now(UTC).timestamp() * 1000)}-{secrets.token_hex(4)}{safe_suffix}"
+    IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = IMAGES_DIR / fname
+    out_path.write_bytes(data)
+    rel_path = f"/assets/img/{fname}"
+    return {"path": rel_path}
 
 
 @app.get("/api/messages")

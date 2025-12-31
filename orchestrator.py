@@ -1,10 +1,10 @@
 # --- LLM Orchestrator --------------------------------
 import os
-from typing import Optional, List
+from typing import Optional, List, Union
 import textwrap
 from datetime import UTC, datetime
 from workspace import MemoryWorkspace
-from datatypes import Message, Role
+from datatypes import Message, Role, ensure_utc
 import dspy
 
 llm_base = "https://api.deepseek.com"
@@ -60,15 +60,19 @@ class Orchestrator:
         if self.dspy_chunker:
             try:
                 out = self.dspy_chunker(text=text, role_hint=role_hint)
-                
+                now = ensure_utc(datetime.now(UTC))
                 for m in out.chunks:
-                        self.workspace.add(m)
-                
+                    m.created_at = now
+                    self.workspace.add(m)
                 return out.chunks
             except Exception as e:
                 print(f"TimeChunker error: {e}")
-                return [Message(content=f"TimeChunker error: {e}", role=Role.SYSTEM)]
-        return [Message(content=text, role=Role.USER)]
+                msg = Message(content=f"TimeChunker error: {e}", role=Role.SYSTEM)
+                self.workspace.add(msg)
+                return [msg]
+        msg = Message(content=text, role=Role.USER)
+        self.workspace.add(msg)
+        return [msg]
     
 
     def basereply(self, instruction: str, user_text: List[Message]) -> List[Message]:
@@ -86,14 +90,14 @@ class Orchestrator:
                     instruction= instruction or "You are a concise, independent-minded assistant.",
                     question=user_text,
                     context=self.workspace.context_block(n=200))
-                
+                now = ensure_utc(datetime.now(UTC))
                 for m in out.response:
+                    m.created_at = now
                     self.workspace.add(m)
-                
                 return out.response
             except Exception as e:
-                return self._fallback_reply(user_text='', note=f"(DSPy error: {e})")
-        return self._fallback_reply(user_text='', note="(no DSPy configured)")
+                return self._fallback_reply(user_text=user_text, note=f"(DSPy error: {e})")
+        return self._fallback_reply(user_text=user_text, note="(no DSPy configured)")
 
 
     def timelinereply(self, user_text: str) -> List[Message]:
@@ -127,11 +131,16 @@ class Orchestrator:
         return self._fallback_summary()
 
     # --- local fallbacks (no network / no DSPy) -----------------------------
-    def _fallback_reply(self, user_text: str, note: str = "") -> List[Message]:
-        return [Message(    
-            content=f"[local] Echo: {user_text} {note}".strip(), 
-            role=Role.ASSISTANT
-            )]
+    def _fallback_reply(self, user_text: Union[str, List[Message]], note: str = "") -> List[Message]:
+        if isinstance(user_text, list):
+            parts = [m.content for m in user_text if getattr(m, "content", None)]
+            user_text = "\n".join(parts)
+        msg = Message(
+            content=f"[local] Echo: {user_text} {note}".strip(),
+            role=Role.ASSISTANT,
+        )
+        self.workspace.add(msg)
+        return [msg]
 
     def _fallback_summary(self, note: str = "") -> List[Message]:
         return [Message(

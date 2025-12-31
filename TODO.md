@@ -13,12 +13,12 @@
 
 ## Near-term milestones (ordered)
 1) Data spine: agree on unified document schema (type, timestamps, tags, source, sensitivity), choose local store (SQLite + embeddings via FAISS/Chroma/LanceDB), set up indices.
-2) Ingest v0: CLI drop-in for files/URLs/text; chunk + embed; dedup by hash + title/url fingerprint; minimal adapters are fine.
-3) Retrieval v0: semantic + time filter; focus-topic pinning to bias retrieval; explicit “reset context” verb.
+2) Ingest v0: web-first drop-in for URLs/text/notes via `/add` and note mode; chunk + embed; dedup by hash + title/url fingerprint; minimal adapters are fine.
+3) Retrieval v0: semantic + time filter; focus-topic pinning; explicit “reset context” verb.
 4) Chat loop v0.5: abstraction over LLM providers; ground responses with top-k retrieved + timeline snippets; context budgeting.
 5) Logging & timeline: store every exchange as events; summarize sessions into the corpus; simple timeline query/view to test temporal reasoning.
 6) Tool safety: sandboxed code execution path with allowlisted packages; capture outputs back into corpus; keep an audit log.
-7) UX: keep CLI, but add clear verbs (ingest, recall, pin focus, reset, run tool, summarize, stash/load) and prepare for future GUI/web.
+7) UX: web-first experience (chat + note shell + history); surface verbs inline; CLI/Textual deprecated.
 
 ## Architecture sketch
 - Services: Ingest pipeline → Storage (docs + embeddings + events) → Retrieval/rerank → Orchestrator (LLM routing, tool exec, context assembly) → Interface layer (CLI/Web).
@@ -30,6 +30,12 @@
 - Ingestion v0 sources: local files, URLs (web pages), raw text (emails/notes), imported chat logs (e.g., ChatGPT).
 - Proactivity: lightweight push reminders.
 - Code execution: Python only, project-local file access.
+
+## Current focus / next steps
+- Finish web-only command surface (no CLI): `/note`, `/add`, `/rss`, `/summarize`, `/clear` (UI only); tighten history rendering and timestamps.
+- Notes: polish image handling and math rendering; add search/filter in note list; autosave without collisions.
+- Retrieval loop: reintroduce semantic recall in web UI as a first-class action (without legacy `/recall` command).
+- Resilience: surface backend errors in UI (LLM failures, storage issues) and ensure unsaved draft recovery.
 
 ## Storage options: quick comparison
 - SQLite + FAISS (or AnnLite): simple, file-based, good locality; you manage migrations and ANN config; portable; Python-first; FAISS GPU optional; more wiring needed (schema + ANN sync).
