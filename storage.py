@@ -57,6 +57,7 @@ class LocalStore:
         self.embedder = embedder
         self.reranker = reranker
         self._faiss_index: Optional[FaissIndex] = None
+        self._fts5_available: bool = False  # Track FTS5 availability
         self._ensure_schema()
         self._migrate_schema_v2()
         self.default_doc_id = self._ensure_default_document()
@@ -202,6 +203,7 @@ class LocalStore:
                     except Exception as e:
                         print(f"[ERROR] FTS5 is not available in this SQLite build: {e}")
                         print("[ERROR] Sparse search will not be available. Please upgrade SQLite with FTS5 support.")
+                        self._fts5_available = False
                         return
                     
                     # Create FTS5 virtual table for sparse search
@@ -278,6 +280,8 @@ class LocalStore:
                     """)
                     print("[info] Created chunks_fts_update trigger")
                 
+                # Mark FTS5 as available if we got this far
+                self._fts5_available = True
                 print("[info] Schema migration v2 completed successfully")
         except Exception as e:
             print(f"[ERROR] Schema migration v2 failed: {e}")
@@ -427,7 +431,7 @@ class LocalStore:
                         json.dumps(msg.metadata) if msg.metadata else None,
                         msg.metadata.get("focus_hint") if msg.metadata else None,
                         msg.metadata.get("char_start", 0) if msg.metadata else 0,
-                        msg.metadata.get("char_end", -1) if msg.metadata else -1,
+                        msg.metadata.get("char_end", len(msg.content)) if msg.metadata else len(msg.content),
                         MODEL_NAME,
                     ),
                 )
@@ -978,6 +982,10 @@ class LocalStore:
     
     def _sparse_retrieval(self, request: SearchRequest) -> List[Candidate]:
         """SQLite FTS5 BM25 search."""
+        # Skip sparse retrieval if FTS5 is not available
+        if not self._fts5_available:
+            return []
+        
         with self._connect() as conn:
             # FTS5 full-text search with joins for filtering
             sql = """
