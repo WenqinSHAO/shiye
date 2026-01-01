@@ -903,6 +903,11 @@ class LocalStore:
                 sql += f" AND c.{time_field} > ?"
                 params.append(request.filters['after'])
             
+            # Apply tags filter if present
+            if request.filters.get('tags'):
+                sql += " AND c.tags LIKE ?"
+                params.append(f'%"{request.filters["tags"]}"%')
+            
             rows = conn.execute(sql, params).fetchall()
         
         # 4. Build candidates with original FAISS scores
@@ -921,7 +926,8 @@ class LocalStore:
                 doc_id=row['document_id'],
                 doc_type=row['doc_type'],
                 timestamp=ensure_utc(datetime.fromisoformat(timestamp_str)) if timestamp_str else None,
-                text_preview=row['text'][:200] if row['text'] else ""
+                text_preview=row['text'][:200] if row['text'] else "",
+                score_history={'dense': float(score_map[row['id']])}
             ))
         
         return sorted(results, key=lambda x: x.score, reverse=True)[:request.top_k * 2]
@@ -977,7 +983,8 @@ class LocalStore:
                 doc_id=row['document_id'],
                 doc_type=row['doc_type'],
                 timestamp=ensure_utc(datetime.fromisoformat(timestamp_str)) if timestamp_str else None,
-                text_preview=row['text'][:200] if row['text'] else ""
+                text_preview=row['text'][:200] if row['text'] else "",
+                score_history={'sparse': normalized_score}
             ))
         
         return results
@@ -1007,9 +1014,12 @@ class LocalStore:
             for rank, candidate in enumerate(channel_results, start=1):
                 rrf_scores[candidate.chunk_id] += 1.0 / (k + rank)
                 
-                # Keep candidate with most metadata
+                # Keep candidate with most metadata and merge score history
                 if candidate.chunk_id not in chunk_map:
                     chunk_map[candidate.chunk_id] = candidate
+                else:
+                    # Merge score histories
+                    chunk_map[candidate.chunk_id].score_history.update(candidate.score_history)
         
         # Build fused candidates
         fused = []
@@ -1017,18 +1027,20 @@ class LocalStore:
             candidate = chunk_map[chunk_id]
             candidate.score = rrf_score
             candidate.channel = 'fused'
+            candidate.score_history['fused'] = rrf_score
             fused.append(candidate)
         
         return fused
     
     def search(self, request: SearchRequest) -> List[Candidate]:
         """Full search pipeline with hybrid retrieval, fusion, rerank, and post-processing."""
+        from config import SHIYE_RRF_K, SHIYE_RECENCY_DECAY_DAYS
         
         # Stage B: Multi-retrieval
         retriever_results = self.search_hybrid(request)
         
-        # Stage C: Fusion
-        fused = self._fuse_rrf(retriever_results)
+        # Stage C: Fusion with configured RRF k
+        fused = self._fuse_rrf(retriever_results, k=SHIYE_RRF_K)
         
         if not fused:
             return []
@@ -1040,9 +1052,9 @@ class LocalStore:
             except Exception as e:
                 print(f"[warn] Reranking failed: {e}")
         
-        # Stage E: Post-processing
+        # Stage E: Post-processing with configured values
         post_processors = [
-            RecencyBooster(),
+            RecencyBooster(decay_days=SHIYE_RECENCY_DECAY_DAYS),
             TypeBooster(),
             ExactMatchBooster(),
             Deduplicator(mode='by_doc')
@@ -1054,5 +1066,9 @@ class LocalStore:
                 result = processor.process(request, result)
             except Exception as e:
                 print(f"[warn] Post-processor {processor.__class__.__name__} failed: {e}")
+        
+        # Add final score to history
+        for candidate in result:
+            candidate.score_history['final'] = candidate.score
         
         return result[:request.top_k]

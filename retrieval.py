@@ -29,6 +29,7 @@ class Candidate:
     doc_type: Optional[str] = None
     timestamp: Optional[datetime] = None
     text_preview: Optional[str] = None
+    score_history: Dict[str, float] = field(default_factory=dict)  # Track scores per stage
 
 
 @dataclass
@@ -125,6 +126,7 @@ class FlashRankReranker:
             if orig:
                 orig.score = item['score']
                 orig.channel = 'rerank'
+                orig.score_history['rerank'] = item['score']
                 result.append(orig)
                 reranked_ids.add(item['id'])
         
@@ -151,7 +153,9 @@ class RecencyBooster:
                 age_days = (now - c.timestamp).days
                 # Linear decay: 1.0 at age=0, 0.0 at age=decay_days
                 recency_factor = max(0, 1.0 - age_days / self.decay_days)
+                old_score = c.score
                 c.score *= (1.0 + self.boost_factor * recency_factor)
+                c.score_history['recency_boost'] = c.score / old_score if old_score > 0 else 1.0
         
         return sorted(candidates, key=lambda x: x.score, reverse=True)
 
@@ -173,7 +177,9 @@ class TypeBooster:
     def process(self, request: SearchRequest, candidates: List[Candidate]) -> List[Candidate]:
         for c in candidates:
             if c.doc_type in self.boosts:
+                old_score = c.score
                 c.score *= self.boosts[c.doc_type]
+                c.score_history['type_boost'] = self.boosts[c.doc_type]
         return sorted(candidates, key=lambda x: x.score, reverse=True)
 
 
@@ -191,6 +197,7 @@ class ExactMatchBooster:
         for c in candidates:
             if c.text_preview and query_lower in c.text_preview.lower():
                 c.score *= self.boost_factor
+                c.score_history['exact_match_boost'] = self.boost_factor
         
         return sorted(candidates, key=lambda x: x.score, reverse=True)
 

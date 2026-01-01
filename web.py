@@ -1702,7 +1702,7 @@ def chat(payload=Body(...)) -> dict:
                 query_parts = []
                 
                 for part in query.split():
-                    if ':' in part and part.split(':')[0] in ['type', 'tag', 'before', 'after']:
+                    if ':' in part and part.split(':')[0] in ['type', 'tag', 'before', 'after', 'time']:
                         key, value = part.split(':', 1)
                         if key == 'type':
                             filters['doc_type'] = value
@@ -1712,6 +1712,9 @@ def chat(payload=Body(...)) -> dict:
                             filters['before'] = value
                         elif key == 'after':
                             filters['after'] = value
+                        elif key == 'time':
+                            # time:event or time:created to select which timestamp field to use
+                            filters['time_field'] = f'{value}_at' if value in ['event', 'created', 'ingested'] else 'created_at'
                     else:
                         query_parts.append(part)
                 

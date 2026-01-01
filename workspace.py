@@ -22,7 +22,21 @@ class MemoryWorkspace:
     def __post_init__(self) -> None:
         if not self.store:
             try:
-                self.store = LocalStore(embedder=EmbeddingProvider())
+                from config import SHIYE_RERANKER
+                from retrieval import FlashRankReranker
+                
+                # Initialize reranker based on config
+                reranker = None
+                if SHIYE_RERANKER and SHIYE_RERANKER.lower() != 'none':
+                    try:
+                        if SHIYE_RERANKER.lower() == 'flashrank':
+                            from config import DATA_DIR
+                            reranker = FlashRankReranker(cache_dir=DATA_DIR / 'models')
+                        # Add other rerankers here as needed (bge, etc.)
+                    except Exception as e:
+                        print(f"[warn] Failed to initialize reranker {SHIYE_RERANKER}: {e}")
+                
+                self.store = LocalStore(embedder=EmbeddingProvider(), reranker=reranker)
             except Exception as e:
                 print(f"[warn] falling back to in-memory store: {e}")
                 self.store = None
@@ -214,7 +228,7 @@ class MemoryWorkspace:
                     created_at=chunk.created_at,
                     event_at=chunk.reference_time,
                     ingested_at=ensure_utc(datetime.fromisoformat(doc.get('ingested_at'))) if doc.get('ingested_at') else None,
-                    scores={'final': candidate.score},
+                    scores=candidate.score_history.copy(),  # Pass complete score history
                     rank=rank,
                     tags=chunk.tags if isinstance(chunk.tags, list) else (list(chunk.tags.keys()) if isinstance(chunk.tags, dict) else []),
                     focus_hint=chunk.focus_hint
