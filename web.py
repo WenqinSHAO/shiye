@@ -97,7 +97,8 @@ def index() -> HTMLResponse:
                 --action-border: #cfd7e2;
             }
             body { font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif; margin: 0; background: var(--bg); color: var(--ink); min-height: 100vh; overflow: hidden; }
-            header { padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 10; }
+            header { padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--border); display: grid; grid-template-columns: 1fr auto 1fr; gap: 16px; align-items: center; position: sticky; top: 0; z-index: 10; }
+            header > div:first-child, header > div:last-child { position: relative; z-index: 2; }
             main { display: grid; grid-template-columns: 1fr; gap: 12px; padding: 12px 16px; height: calc(100vh - 64px); box-sizing: border-box; overflow: hidden; }
             body.show-history main { grid-template-columns: 2fr auto; }
             body.note-mode main { grid-template-columns: 1fr; }
@@ -180,9 +181,9 @@ def index() -> HTMLResponse:
             .history-day-count { font-size: 12px; color: var(--subtle); }
             .history-day-body { padding: 8px 10px; display: none; background: #f9fbff; border-top: 1px solid var(--border); }
             .history-subtle { font-size: 12px; color: var(--subtle); }
-            #toast-container { position: fixed; bottom: 18px; right: 18px; left: auto; top: auto; display: flex; flex-direction: column-reverse; gap: 10px; z-index: 120; pointer-events: none; align-items: flex-end; max-width: 420px; }
-            .toast { min-width: 240px; max-width: 360px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border); background: #fff; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.18); opacity: 0; transform: translateY(12px); transition: transform 0.2s ease, opacity 0.2s ease; display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--ink); pointer-events: auto; }
-            .toast.show { opacity: 1; transform: translateY(0); }
+            #toast-container { position: fixed; inset: auto 26px 26px auto; display: flex; flex-direction: column-reverse; gap: 12px; z-index: 180; pointer-events: none; align-items: flex-end; width: min(360px, calc(100vw - 52px)); }
+            .toast { width: 100%; max-width: 340px; padding: 12px 14px; border-radius: 14px; border: 1px solid rgba(98, 115, 138, 0.22); background: rgba(255, 255, 255, 0.92); box-shadow: 0 16px 38px rgba(15, 23, 42, 0.18); opacity: 0; transform: translateY(14px) scale(0.98); transition: transform 0.22s ease, opacity 0.22s ease; display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--ink); pointer-events: auto; backdrop-filter: blur(8px); }
+            .toast.show { opacity: 1; transform: translateY(0) scale(1); }
             .toast-info { background: #e9f1ff; border-color: #cddffb; }
             .toast-success { background: #ecfdf3; border-color: #bbf7d0; color: #166534; }
             .toast-error { background: #fff1f2; border-color: #fecdd3; color: #991b1b; }
@@ -191,19 +192,23 @@ def index() -> HTMLResponse:
             .note-banner.show { display: inline-flex; }
             .note-banner button { font-size: 12px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); cursor: pointer; }
             .note-pill.inline { padding: 4px 10px; font-size: 12px; }
-            #status-banner { display: none; margin: 10px 16px 0; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--border); background: var(--panel); color: var(--ink); box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08); align-items: center; gap: 8px; font-size: 13px; }
-            #status-banner.show { display: flex; }
+            #status-banner { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 8px; border: 1px solid transparent; background: transparent; color: var(--ink); font-size: 12px; justify-self: center; max-width: 480px; opacity: 0; transform: scale(0.94); transition: opacity 0.18s ease, transform 0.18s ease, background 0.18s ease, border-color 0.18s ease; pointer-events: none; position: relative; z-index: 1; }
+            #status-banner.show { opacity: 1; transform: scale(1); pointer-events: auto; }
             #status-banner.status-info { border-color: #cddffb; background: #e9f1ff; }
             #status-banner.status-error { border-color: #fecdd3; background: #fff1f2; color: #7f1d1d; }
             #status-banner.status-success { border-color: #bbf7d0; background: #ecfdf3; color: #166534; }
-            #status-text { flex: 1; }
-            #status-close { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); cursor: pointer; padding: 4px 8px; font-size: 12px; color: var(--subtle); }
+            #status-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 400px; }
+            #status-close { border: 1px solid var(--border); border-radius: 6px; background: rgba(255,255,255,0.7); cursor: pointer; padding: 3px 7px; font-size: 11px; color: var(--subtle); flex-shrink: 0; }
         </style>
     </head>
     <body>
         <header>
             <div><strong>Shiye</strong> — Your personal knowledge base</div>
-            <div class="row">
+            <div id="status-banner" role="status" aria-live="polite">
+                <span id="status-text"></span>
+                <button id="status-close" type="button" aria-label="Dismiss status">✕</button>
+            </div>
+            <div class="row" style="justify-self: end;">
                 <label style="display:flex;align-items:center;gap:6px;color:#4b5563;font-size:12px;">
                     <input type="checkbox" id="debugToggle" onclick="toggleDebug()" checked />
                     debug
@@ -212,10 +217,6 @@ def index() -> HTMLResponse:
                 <button id="historyBtn" type="button" class="ghost" onclick="toggleHistory()">History</button>
             </div>
         </header>
-        <div id="status-banner" role="status" aria-live="polite">
-            <span id="status-text"></span>
-            <button id="status-close" type="button" aria-label="Dismiss status">✕</button>
-        </div>
         <main>
             <section class="chat">
                 <div id="log"></div>
@@ -433,6 +434,59 @@ def index() -> HTMLResponse:
                 const label = rawLabel && rawLabel.trim() !== "" ? rawLabel : safeHref;
                 return `<a href="${safeHref}"${t} target="_blank" rel="noopener noreferrer">${label}</a>`;
             };
+            
+            // Helper to resolve relative GitHub URLs
+            function resolveGitHubUrl(imageUrl, sourceUrl) {
+                if (!imageUrl || !sourceUrl) return imageUrl;
+                // If already absolute, return as-is
+                if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) {
+                    return imageUrl;
+                }
+                // Parse GitHub URL to extract owner, repo, and branch
+                try {
+                    const url = new URL(sourceUrl);
+                    if (!url.hostname.includes('github')) return imageUrl;
+                    
+                    const pathParts = url.pathname.split('/').filter(p => p);
+                    if (pathParts.length < 2) return imageUrl;
+                    
+                    const owner = pathParts[0];
+                    const repo = pathParts[1];
+                    let branch = 'HEAD';
+                    let basePath = '';
+                    
+                    // Extract branch and path from URL patterns like:
+                    // /owner/repo/blob/branch/path/file.md
+                    // /owner/repo/tree/branch/path
+                    if (pathParts[2] === 'blob' || pathParts[2] === 'tree') {
+                        branch = pathParts[3] || 'HEAD';
+                        basePath = pathParts.slice(4, -1).join('/');
+                    }
+                    
+                    // Remove leading ./ or /
+                    let relPath = imageUrl.replace(/^\\\\.?\\\\/?\\/g, '');
+                    
+                    // Construct full path
+                    const fullPath = basePath ? `${basePath}/${relPath}` : relPath;
+                    
+                    // Return raw.githubusercontent.com URL
+                    return `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${fullPath}`;
+                } catch (e) {
+                    console.warn('Failed to resolve GitHub URL:', e);
+                    return imageUrl;
+                }
+            }
+            
+            // Store current message context for image rendering
+            let currentMessageUrl = null;
+            
+            renderer.image = (href, title, text) => {
+                const resolvedHref = currentMessageUrl ? resolveGitHubUrl(href, currentMessageUrl) : href;
+                const t = title ? ` title="${title}"` : "";
+                const alt = text || "";
+                return `<img src="${resolvedHref}" alt="${alt}"${t} />`;
+            };
+            
             marked.setOptions({ renderer });
             let mathQueue = [];
             let historyOpen = false;
@@ -1006,7 +1060,10 @@ def index() -> HTMLResponse:
                 roleEl.textContent = role + " • " + ts;
                 const bubble = document.createElement('div');
                 bubble.className = 'bubble';
+                // Set context for image URL resolution
+                currentMessageUrl = metadata?.url || null;
                 bubble.innerHTML = marked.parse(content || '');
+                currentMessageUrl = null; // Reset after parsing
                 const actions = document.createElement('div');
                 actions.className = 'actions';
                 const del = document.createElement('button');
@@ -1162,7 +1219,10 @@ def index() -> HTMLResponse:
                 roleEl.textContent = `${m.role} • ${ts}`;
                 const body = document.createElement('div');
                 body.className = 'history-body';
+                // Set context for image URL resolution
+                currentMessageUrl = m.metadata?.url || null;
                 body.innerHTML = marked.parse(m.content || '');
+                currentMessageUrl = null; // Reset after parsing
                 const actions = document.createElement('div');
                 actions.className = 'actions';
                 const del = document.createElement('button');
