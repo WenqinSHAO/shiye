@@ -879,7 +879,7 @@ class LocalStore:
         with self._connect() as conn:
             placeholders = ','.join('?' * len(chunk_ids))
             sql = f"""
-            SELECT c.id, c.document_id, c.text, c.created_at, c.event_at, d.doc_type, c.tags as chunk_tags, d.tags as doc_tags
+            SELECT c.id, c.document_id, c.text, c.created_at, c.event_at, d.ingested_at, d.doc_type, c.tags as chunk_tags, d.tags as doc_tags
             FROM chunks c
             JOIN documents d ON c.document_id = d.id
             WHERE c.id IN ({placeholders})
@@ -895,12 +895,16 @@ class LocalStore:
             
             if request.filters.get('before'):
                 time_field = request.filters.get('time_field', 'created_at')
-                sql += f" AND c.{time_field} < ?"
+                # Use correct table prefix: d. for ingested_at, c. for others
+                table_prefix = 'd.' if time_field == 'ingested_at' else 'c.'
+                sql += f" AND {table_prefix}{time_field} < ?"
                 params.append(request.filters['before'])
             
             if request.filters.get('after'):
                 time_field = request.filters.get('time_field', 'created_at')
-                sql += f" AND c.{time_field} > ?"
+                # Use correct table prefix: d. for ingested_at, c. for others
+                table_prefix = 'd.' if time_field == 'ingested_at' else 'c.'
+                sql += f" AND {table_prefix}{time_field} > ?"
                 params.append(request.filters['after'])
             
             # Apply tags filter - check both chunk and document tags
@@ -915,11 +919,22 @@ class LocalStore:
         # 4. Build candidates with original FAISS scores
         results = []
         score_map = dict(zip(chunk_ids, scores))
+        
+        # Determine which timestamp field to use based on filter
+        time_field = request.filters.get('time_field', 'created_at')
+        
         for row in rows:
-            # sqlite3.Row doesn't support .get(), use direct access with fallback
-            event_at = row['event_at'] if row['event_at'] else None
-            created_at = row['created_at'] if row['created_at'] else None
-            timestamp_str = event_at or created_at
+            # Extract the appropriate timestamp based on time_field filter
+            if time_field == 'ingested_at':
+                timestamp_str = row['ingested_at'] if row['ingested_at'] else None
+            elif time_field == 'event_at':
+                timestamp_str = row['event_at'] if row['event_at'] else None
+            else:  # created_at (default)
+                timestamp_str = row['created_at'] if row['created_at'] else None
+            
+            # Fallback to event_at or created_at if selected field is None
+            if not timestamp_str:
+                timestamp_str = row['event_at'] if row['event_at'] else row['created_at']
             
             results.append(Candidate(
                 chunk_id=row['id'],
@@ -946,6 +961,7 @@ class LocalStore:
                 c.document_id,
                 c.created_at,
                 c.event_at,
+                d.ingested_at,
                 f.doc_type,
                 c.tags as chunk_tags,
                 d.tags as doc_tags
@@ -965,12 +981,16 @@ class LocalStore:
             
             if request.filters.get('before'):
                 time_field = request.filters.get('time_field', 'created_at')
-                sql += f" AND c.{time_field} < ?"
+                # Use correct table prefix: d. for ingested_at, c. for others
+                table_prefix = 'd.' if time_field == 'ingested_at' else 'c.'
+                sql += f" AND {table_prefix}{time_field} < ?"
                 params.append(request.filters['before'])
             
             if request.filters.get('after'):
                 time_field = request.filters.get('time_field', 'created_at')
-                sql += f" AND c.{time_field} > ?"
+                # Use correct table prefix: d. for ingested_at, c. for others
+                table_prefix = 'd.' if time_field == 'ingested_at' else 'c.'
+                sql += f" AND {table_prefix}{time_field} > ?"
                 params.append(request.filters['after'])
             
             # Apply tags filter - check both chunk and document tags
@@ -991,11 +1011,24 @@ class LocalStore:
         
         # BM25 scores are negative (lower is better), normalize to positive
         results = []
+        
+        # Determine which timestamp field to use based on filter
+        time_field = request.filters.get('time_field', 'created_at')
+        
         for row in rows:
-            # sqlite3.Row doesn't support .get(), use direct access with fallback
-            event_at = row['event_at'] if row['event_at'] else None
-            created_at = row['created_at'] if row['created_at'] else None
-            timestamp_str = event_at or created_at
+            # Extract the appropriate timestamp based on time_field filter
+            if time_field == 'ingested_at':
+                timestamp_str = row['ingested_at'] if row['ingested_at'] else None
+            elif time_field == 'event_at':
+                timestamp_str = row['event_at'] if row['event_at'] else None
+            else:  # created_at (default)
+                timestamp_str = row['created_at'] if row['created_at'] else None
+            
+            # Fallback to event_at or created_at if selected field is None
+            if not timestamp_str:
+                event_at = row['event_at'] if row['event_at'] else None
+                created_at = row['created_at'] if row['created_at'] else None
+                timestamp_str = event_at or created_at
             
             normalized_score = 1.0 / (1.0 + abs(row['score']))  # convert to 0-1 range
             results.append(Candidate(
