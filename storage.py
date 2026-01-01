@@ -27,6 +27,10 @@ class StoredChunk:
     embedding_id: Optional[int]
     tags: Optional[dict]
     focus_hint: Optional[str]
+    char_start: int = 0
+    char_end: int = -1
+    embedding_model: Optional[str] = None
+    chunk_window: Optional[str] = None
 
 
 class NoteConflictError(Exception):
@@ -172,62 +176,91 @@ class LocalStore:
         with self._connect() as conn:
             cur = conn.cursor()
             
-            # Check if already migrated by looking for char_start column
+            # Check if columns need to be added
             cursor = cur.execute("PRAGMA table_info(chunks)")
             columns = [row[1] for row in cursor.fetchall()]
             
-            if 'char_start' in columns:
-                # Already migrated
-                return
+            if 'char_start' not in columns:
+                # Add new columns to chunks table
+                cur.execute("ALTER TABLE chunks ADD COLUMN char_start INTEGER DEFAULT 0")
+                cur.execute("ALTER TABLE chunks ADD COLUMN char_end INTEGER DEFAULT -1")
+                cur.execute(f"ALTER TABLE chunks ADD COLUMN embedding_model TEXT DEFAULT '{MODEL_NAME}'")
+                cur.execute("ALTER TABLE chunks ADD COLUMN chunk_window TEXT")
             
-            # Add new columns to chunks table
-            cur.execute("ALTER TABLE chunks ADD COLUMN char_start INTEGER DEFAULT 0")
-            cur.execute("ALTER TABLE chunks ADD COLUMN char_end INTEGER DEFAULT -1")
-            cur.execute(f"ALTER TABLE chunks ADD COLUMN embedding_model TEXT DEFAULT '{MODEL_NAME}'")
-            cur.execute("ALTER TABLE chunks ADD COLUMN chunk_window TEXT")
+            # Check if FTS5 table exists (independent of column check)
+            cursor = cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='chunks_fts'")
+            fts_exists = cursor.fetchone() is not None
             
-            # Create FTS5 virtual table for sparse search
-            cur.execute("""
-                CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-                    chunk_id UNINDEXED,
-                    text,
-                    doc_type UNINDEXED,
-                    tokenize='porter unicode61'
-                )
-            """)
-            
-            # Populate FTS5 from existing chunks
-            cur.execute("""
-                INSERT INTO chunks_fts(chunk_id, text, doc_type)
-                SELECT 
-                    c.id, 
-                    c.text, 
-                    d.doc_type
-                FROM chunks c
-                JOIN documents d ON c.document_id = d.id
-                WHERE c.deleted = 0
-            """)
-            
-            # Create trigger to keep FTS5 in sync on INSERT
-            cur.execute("""
-                CREATE TRIGGER IF NOT EXISTS chunks_fts_insert
-                AFTER INSERT ON chunks
-                BEGIN
+            if not fts_exists:
+                # Create FTS5 virtual table for sparse search
+                cur.execute("""
+                    CREATE VIRTUAL TABLE chunks_fts USING fts5(
+                        chunk_id UNINDEXED,
+                        text,
+                        doc_type UNINDEXED,
+                        tokenize='porter unicode61'
+                    )
+                """)
+                
+                # Populate FTS5 from existing chunks
+                cur.execute("""
                     INSERT INTO chunks_fts(chunk_id, text, doc_type)
-                    SELECT NEW.id, NEW.text, d.doc_type
-                    FROM documents d WHERE d.id = NEW.document_id;
-                END
-            """)
+                    SELECT 
+                        c.id, 
+                        c.text, 
+                        d.doc_type
+                    FROM chunks c
+                    JOIN documents d ON c.document_id = d.id
+                    WHERE c.deleted = 0
+                """)
             
-            # Create trigger to keep FTS5 in sync on DELETE
-            cur.execute("""
-                CREATE TRIGGER IF NOT EXISTS chunks_fts_delete
-                AFTER UPDATE OF deleted ON chunks
-                WHEN NEW.deleted = 1
-                BEGIN
-                    DELETE FROM chunks_fts WHERE chunk_id = NEW.id;
-                END
-            """)
+            # Check and create triggers independently (they may be missing even if table exists)
+            # Check if triggers exist
+            cursor = cur.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name='chunks_fts_insert'")
+            insert_trigger_exists = cursor.fetchone() is not None
+            
+            cursor = cur.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name='chunks_fts_delete'")
+            delete_trigger_exists = cursor.fetchone() is not None
+            
+            cursor = cur.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name='chunks_fts_update'")
+            update_trigger_exists = cursor.fetchone() is not None
+            
+            if not insert_trigger_exists:
+                # Create trigger to keep FTS5 in sync on INSERT
+                cur.execute("""
+                    CREATE TRIGGER chunks_fts_insert
+                    AFTER INSERT ON chunks
+                    BEGIN
+                        INSERT INTO chunks_fts(chunk_id, text, doc_type)
+                        SELECT NEW.id, NEW.text, d.doc_type
+                        FROM documents d WHERE d.id = NEW.document_id;
+                    END
+                """)
+            
+            if not delete_trigger_exists:
+                # Create trigger to keep FTS5 in sync on DELETE (soft delete)
+                cur.execute("""
+                    CREATE TRIGGER chunks_fts_delete
+                    AFTER UPDATE OF deleted ON chunks
+                    WHEN NEW.deleted = 1
+                    BEGIN
+                        DELETE FROM chunks_fts WHERE chunk_id = NEW.id;
+                    END
+                """)
+            
+            if not update_trigger_exists:
+                # Create trigger to keep FTS5 in sync on UPDATE
+                cur.execute("""
+                    CREATE TRIGGER chunks_fts_update
+                    AFTER UPDATE OF text ON chunks
+                    WHEN NEW.deleted = 0
+                    BEGIN
+                        DELETE FROM chunks_fts WHERE chunk_id = NEW.id;
+                        INSERT INTO chunks_fts(chunk_id, text, doc_type)
+                        SELECT NEW.id, NEW.text, d.doc_type
+                        FROM documents d WHERE d.id = NEW.document_id;
+                    END
+                """)
             
             print("[info] Schema migration v2 completed successfully")
 
@@ -804,7 +837,11 @@ class LocalStore:
                 reference_time=ensure_utc(datetime.fromisoformat(row['event_at'])) if row['event_at'] else None,
                 embedding_id=row['embedding_id'],
                 tags=json.loads(row['tags']) if row['tags'] else None,
-                focus_hint=row['focus_hint']
+                focus_hint=row['focus_hint'],
+                char_start=row['char_start'] if 'char_start' in row.keys() else 0,
+                char_end=row['char_end'] if 'char_end' in row.keys() else -1,
+                embedding_model=row['embedding_model'] if 'embedding_model' in row.keys() else None,
+                chunk_window=row['chunk_window'] if 'chunk_window' in row.keys() else None
             )
     
     def get_document(self, doc_id: int) -> dict:
@@ -872,13 +909,18 @@ class LocalStore:
         results = []
         score_map = dict(zip(chunk_ids, scores))
         for row in rows:
+            # sqlite3.Row doesn't support .get(), use direct access with fallback
+            event_at = row['event_at'] if row['event_at'] else None
+            created_at = row['created_at'] if row['created_at'] else None
+            timestamp_str = event_at or created_at
+            
             results.append(Candidate(
                 chunk_id=row['id'],
                 score=float(score_map[row['id']]),
                 channel='dense',
                 doc_id=row['document_id'],
                 doc_type=row['doc_type'],
-                timestamp=ensure_utc(datetime.fromisoformat(row.get('event_at') or row['created_at'])) if (row.get('event_at') or row['created_at']) else None,
+                timestamp=ensure_utc(datetime.fromisoformat(timestamp_str)) if timestamp_str else None,
                 text_preview=row['text'][:200] if row['text'] else ""
             ))
         
@@ -922,6 +964,11 @@ class LocalStore:
         # BM25 scores are negative (lower is better), normalize to positive
         results = []
         for row in rows:
+            # sqlite3.Row doesn't support .get(), use direct access with fallback
+            event_at = row['event_at'] if row['event_at'] else None
+            created_at = row['created_at'] if row['created_at'] else None
+            timestamp_str = event_at or created_at
+            
             normalized_score = 1.0 / (1.0 + abs(row['score']))  # convert to 0-1 range
             results.append(Candidate(
                 chunk_id=row['chunk_id'],
@@ -929,7 +976,7 @@ class LocalStore:
                 channel='sparse',
                 doc_id=row['document_id'],
                 doc_type=row['doc_type'],
-                timestamp=ensure_utc(datetime.fromisoformat(row.get('event_at') or row['created_at'])) if (row.get('event_at') or row['created_at']) else None,
+                timestamp=ensure_utc(datetime.fromisoformat(timestamp_str)) if timestamp_str else None,
                 text_preview=row['text'][:200] if row['text'] else ""
             ))
         

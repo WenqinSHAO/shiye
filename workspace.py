@@ -208,9 +208,9 @@ class MemoryWorkspace:
                     doc_title=doc.get('title'),
                     doc_source=doc.get('uri') or doc.get('source'),
                     text=chunk.text,
-                    char_start=0,  # Will be populated from chunk metadata once available
-                    char_end=-1,
-                    chunk_window=None,
+                    char_start=chunk.char_start,
+                    char_end=chunk.char_end,
+                    chunk_window=chunk.chunk_window,
                     created_at=chunk.created_at,
                     event_at=chunk.reference_time,
                     ingested_at=ensure_utc(datetime.fromisoformat(doc.get('ingested_at'))) if doc.get('ingested_at') else None,
