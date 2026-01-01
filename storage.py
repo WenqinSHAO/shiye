@@ -173,96 +173,117 @@ class LocalStore:
         - chunks_fts FTS5 virtual table for sparse search
         - Triggers to keep FTS5 table in sync
         """
-        with self._connect() as conn:
-            cur = conn.cursor()
-            
-            # Check if columns need to be added
-            cursor = cur.execute("PRAGMA table_info(chunks)")
-            columns = [row[1] for row in cursor.fetchall()]
-            
-            if 'char_start' not in columns:
-                # Add new columns to chunks table
-                cur.execute("ALTER TABLE chunks ADD COLUMN char_start INTEGER DEFAULT 0")
-                cur.execute("ALTER TABLE chunks ADD COLUMN char_end INTEGER DEFAULT -1")
-                cur.execute(f"ALTER TABLE chunks ADD COLUMN embedding_model TEXT DEFAULT '{MODEL_NAME}'")
-                cur.execute("ALTER TABLE chunks ADD COLUMN chunk_window TEXT")
-            
-            # Check if FTS5 table exists (independent of column check)
-            cursor = cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='chunks_fts'")
-            fts_exists = cursor.fetchone() is not None
-            
-            if not fts_exists:
-                # Create FTS5 virtual table for sparse search
-                cur.execute("""
-                    CREATE VIRTUAL TABLE chunks_fts USING fts5(
-                        chunk_id UNINDEXED,
-                        text,
-                        doc_type UNINDEXED,
-                        tokenize='porter unicode61'
-                    )
-                """)
+        try:
+            with self._connect() as conn:
+                cur = conn.cursor()
                 
-                # Populate FTS5 from existing chunks
-                cur.execute("""
-                    INSERT INTO chunks_fts(chunk_id, text, doc_type)
-                    SELECT 
-                        c.id, 
-                        c.text, 
-                        d.doc_type
-                    FROM chunks c
-                    JOIN documents d ON c.document_id = d.id
-                    WHERE c.deleted = 0
-                """)
-            
-            # Check and create triggers independently (they may be missing even if table exists)
-            # Check if triggers exist
-            cursor = cur.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name='chunks_fts_insert'")
-            insert_trigger_exists = cursor.fetchone() is not None
-            
-            cursor = cur.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name='chunks_fts_delete'")
-            delete_trigger_exists = cursor.fetchone() is not None
-            
-            cursor = cur.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name='chunks_fts_update'")
-            update_trigger_exists = cursor.fetchone() is not None
-            
-            if not insert_trigger_exists:
-                # Create trigger to keep FTS5 in sync on INSERT
-                cur.execute("""
-                    CREATE TRIGGER chunks_fts_insert
-                    AFTER INSERT ON chunks
-                    BEGIN
+                # Check if columns need to be added
+                cursor = cur.execute("PRAGMA table_info(chunks)")
+                columns = [row[1] for row in cursor.fetchall()]
+                
+                if 'char_start' not in columns:
+                    # Add new columns to chunks table
+                    cur.execute("ALTER TABLE chunks ADD COLUMN char_start INTEGER DEFAULT 0")
+                    cur.execute("ALTER TABLE chunks ADD COLUMN char_end INTEGER DEFAULT -1")
+                    cur.execute(f"ALTER TABLE chunks ADD COLUMN embedding_model TEXT DEFAULT '{MODEL_NAME}'")
+                    cur.execute("ALTER TABLE chunks ADD COLUMN chunk_window TEXT")
+                    print("[info] Added citation columns to chunks table")
+                
+                # Check if FTS5 table exists (independent of column check)
+                cursor = cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='chunks_fts'")
+                fts_exists = cursor.fetchone() is not None
+                
+                if not fts_exists:
+                    # Test FTS5 support before attempting to create
+                    try:
+                        cur.execute("SELECT fts5_version()")
+                        fts5_version = cur.fetchone()[0]
+                        print(f"[info] FTS5 version: {fts5_version}")
+                    except Exception as e:
+                        print(f"[ERROR] FTS5 is not available in this SQLite build: {e}")
+                        print("[ERROR] Sparse search will not be available. Please upgrade SQLite with FTS5 support.")
+                        return
+                    
+                    # Create FTS5 virtual table for sparse search
+                    cur.execute("""
+                        CREATE VIRTUAL TABLE chunks_fts USING fts5(
+                            chunk_id UNINDEXED,
+                            text,
+                            doc_type UNINDEXED,
+                            tokenize='porter unicode61'
+                        )
+                    """)
+                
+                    # Populate FTS5 from existing chunks
+                    cur.execute("""
                         INSERT INTO chunks_fts(chunk_id, text, doc_type)
-                        SELECT NEW.id, NEW.text, d.doc_type
-                        FROM documents d WHERE d.id = NEW.document_id;
-                    END
-                """)
-            
-            if not delete_trigger_exists:
-                # Create trigger to keep FTS5 in sync on DELETE (soft delete)
-                cur.execute("""
-                    CREATE TRIGGER chunks_fts_delete
-                    AFTER UPDATE OF deleted ON chunks
-                    WHEN NEW.deleted = 1
-                    BEGIN
-                        DELETE FROM chunks_fts WHERE chunk_id = NEW.id;
-                    END
-                """)
-            
-            if not update_trigger_exists:
-                # Create trigger to keep FTS5 in sync on UPDATE
-                cur.execute("""
-                    CREATE TRIGGER chunks_fts_update
-                    AFTER UPDATE OF text ON chunks
-                    WHEN NEW.deleted = 0
-                    BEGIN
-                        DELETE FROM chunks_fts WHERE chunk_id = NEW.id;
-                        INSERT INTO chunks_fts(chunk_id, text, doc_type)
-                        SELECT NEW.id, NEW.text, d.doc_type
-                        FROM documents d WHERE d.id = NEW.document_id;
-                    END
-                """)
-            
-            print("[info] Schema migration v2 completed successfully")
+                        SELECT 
+                            c.id, 
+                            c.text, 
+                            d.doc_type
+                        FROM chunks c
+                        JOIN documents d ON c.document_id = d.id
+                        WHERE c.deleted = 0
+                    """)
+                    print("[info] Created FTS5 table and populated with existing chunks")
+                
+                # Check and create triggers independently (they may be missing even if table exists)
+                # Check if triggers exist
+                cursor = cur.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name='chunks_fts_insert'")
+                insert_trigger_exists = cursor.fetchone() is not None
+                
+                cursor = cur.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name='chunks_fts_delete'")
+                delete_trigger_exists = cursor.fetchone() is not None
+                
+                cursor = cur.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name='chunks_fts_update'")
+                update_trigger_exists = cursor.fetchone() is not None
+                
+                if not insert_trigger_exists:
+                    # Create trigger to keep FTS5 in sync on INSERT
+                    cur.execute("""
+                        CREATE TRIGGER chunks_fts_insert
+                        AFTER INSERT ON chunks
+                        BEGIN
+                            INSERT INTO chunks_fts(chunk_id, text, doc_type)
+                            SELECT NEW.id, NEW.text, d.doc_type
+                            FROM documents d WHERE d.id = NEW.document_id;
+                        END
+                    """)
+                    print("[info] Created chunks_fts_insert trigger")
+                
+                if not delete_trigger_exists:
+                    # Create trigger to keep FTS5 in sync on DELETE (soft delete)
+                    cur.execute("""
+                        CREATE TRIGGER chunks_fts_delete
+                        AFTER UPDATE OF deleted ON chunks
+                        WHEN NEW.deleted = 1
+                        BEGIN
+                            DELETE FROM chunks_fts WHERE chunk_id = NEW.id;
+                        END
+                    """)
+                    print("[info] Created chunks_fts_delete trigger")
+                
+                if not update_trigger_exists:
+                    # Create trigger to keep FTS5 in sync on UPDATE
+                    cur.execute("""
+                        CREATE TRIGGER chunks_fts_update
+                        AFTER UPDATE OF text ON chunks
+                        WHEN NEW.deleted = 0
+                        BEGIN
+                            DELETE FROM chunks_fts WHERE chunk_id = NEW.id;
+                            INSERT INTO chunks_fts(chunk_id, text, doc_type)
+                            SELECT NEW.id, NEW.text, d.doc_type
+                            FROM documents d WHERE d.id = NEW.document_id;
+                        END
+                    """)
+                    print("[info] Created chunks_fts_update trigger")
+                
+                print("[info] Schema migration v2 completed successfully")
+        except Exception as e:
+            print(f"[ERROR] Schema migration v2 failed: {e}")
+            import traceback
+            traceback.print_exc()
+            print("[WARN] Some features (sparse search) may not be available")
 
     def _maybe_embed(self, texts: Sequence[str]):
         if self.embedder and self._faiss_index:
@@ -604,16 +625,16 @@ class LocalStore:
                     cur.execute(
                         """
                         UPDATE chunks
-                        SET text = ?, event_at = ?, tags = ?
+                        SET text = ?, event_at = ?, tags = ?, char_start = ?, char_end = ?, embedding_model = ?
                         WHERE id = ?
                         """,
-                        (content, now_iso, tags_json, chunk_id),
+                        (content, now_iso, tags_json, 0, len(content), MODEL_NAME, chunk_id),
                     )
                 else:
                     cur.execute(
                         """
-                        INSERT INTO chunks (document_id, seq, text, role, token_count, embedding_id, created_at, event_at, tags, focus_hint)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO chunks (document_id, seq, text, role, token_count, embedding_id, created_at, event_at, tags, focus_hint, char_start, char_end, embedding_model)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             note_id,
@@ -626,6 +647,9 @@ class LocalStore:
                             now_iso,
                             tags_json,
                             None,
+                            0,
+                            len(content),
+                            MODEL_NAME,
                         ),
                     )
                     chunk_id = cur.lastrowid
@@ -646,8 +670,8 @@ class LocalStore:
                 tags_json = json.dumps(chunk_tags)
                 cur.execute(
                     """
-                    INSERT INTO chunks (document_id, seq, text, role, token_count, embedding_id, created_at, event_at, tags, focus_hint)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO chunks (document_id, seq, text, role, token_count, embedding_id, created_at, event_at, tags, focus_hint, char_start, char_end, embedding_model)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         doc_id,
@@ -660,6 +684,9 @@ class LocalStore:
                         now_iso,
                         tags_json,
                         None,
+                        0,
+                        len(content),
+                        MODEL_NAME,
                     ),
                 )
                 chunk_id = cur.lastrowid
