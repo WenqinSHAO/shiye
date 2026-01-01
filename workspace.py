@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import List, Optional
 
-from datatypes import Message
+from datatypes import Message, ensure_utc
 from embeddings import EmbeddingProvider
 from storage import LocalStore
 
@@ -47,6 +47,34 @@ class MemoryWorkspace:
         if self.store:
             return self.store.list_recent(n)
         return self._fallback_items[-n:]
+
+    def list_messages_by_day(self, day: str, limit: int = 500) -> List[Message]:
+        """Return messages for a given calendar day (YYYY-MM-DD), ordered by creation."""
+        if self.store:
+            return self.store.list_messages_by_day(day=day, limit=limit)
+        results: List[Message] = []
+        for msg in self._fallback_items:
+            if not getattr(msg, "created_at", None):
+                continue
+            dt = ensure_utc(msg.created_at)
+            if dt.date().isoformat() == day:
+                results.append(msg)
+        results.sort(key=lambda m: ensure_utc(m.created_at))
+        return results[:limit]
+
+    def list_message_days(self, limit: int = 180) -> List[dict]:
+        """Return available message days with counts, newest first."""
+        if self.store:
+            return self.store.list_message_days(limit=limit)
+        counts = {}
+        for msg in self._fallback_items:
+            if not getattr(msg, "created_at", None):
+                continue
+            day = ensure_utc(msg.created_at).date().isoformat()
+            counts[day] = counts.get(day, 0) + 1
+        days = [{"day": k, "count": v} for k, v in counts.items()]
+        days.sort(key=lambda d: d["day"], reverse=True)
+        return days[:limit]
 
     def clear(self) -> None:
         if self.store:

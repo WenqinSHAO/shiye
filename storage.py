@@ -322,6 +322,38 @@ class LocalStore:
             rows = cur.fetchall()
         return [self._row_to_message(r) for r in reversed(rows)]
 
+    def list_messages_by_day(self, day: str, limit: int = 500) -> List[Message]:
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT * FROM chunks
+                WHERE deleted = 0 AND created_at IS NOT NULL AND date(created_at) = ?
+                ORDER BY datetime(created_at)
+                LIMIT ?
+                """,
+                (day, limit),
+            )
+            rows = cur.fetchall()
+        return [self._row_to_message(r) for r in rows]
+
+    def list_message_days(self, limit: int = 180) -> List[dict]:
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT date(created_at) AS day, COUNT(*) AS count
+                FROM chunks
+                WHERE deleted = 0 AND created_at IS NOT NULL
+                GROUP BY day
+                ORDER BY day DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+        return [{"day": row["day"], "count": row["count"]} for row in rows if row["day"]]
+
     def context_block(self, n: int = 13) -> List[Message]:
         with self._connect() as conn:
             cur = conn.cursor()

@@ -76,6 +76,7 @@ Environment variables:
 
 - Debug traces are enabled by default to surface LLM reasoning; uncheck the header toggle if you want quieter responses.
 - In note mode, use the **Insert date/time** button in the editor panel to drop in a current timestamp.
+- History view lazy-loads by day: it opens today by default, and you can expand other days/months on demand to keep the UI fast.
 
 ### Data Storage
 

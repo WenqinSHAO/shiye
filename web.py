@@ -168,6 +168,17 @@ def index() -> HTMLResponse:
             .history-expand { margin-top: 6px; font-size: 11px; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel); cursor: pointer; }
             .command-strip { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--subtle); }
             .command-pill { padding: 4px 8px; border-radius: 999px; border: 1px solid var(--border); background: #f3f6fb; color: var(--ink); font-weight: 600; }
+            .history-month { margin-bottom: 10px; }
+            .history-month-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--border); background: #eef3fb; cursor: pointer; }
+            .history-month-title { font-weight: 600; color: var(--ink); }
+            .history-month-count { font-size: 12px; color: var(--subtle); }
+            .history-days { margin-top: 6px; display: flex; flex-direction: column; gap: 8px; }
+            .history-day { border: 1px solid var(--border); border-radius: 10px; background: #fff; }
+            .history-day-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; cursor: pointer; }
+            .history-day-label { font-weight: 600; }
+            .history-day-count { font-size: 12px; color: var(--subtle); }
+            .history-day-body { padding: 8px 10px; display: none; background: #f9fbff; border-top: 1px solid var(--border); }
+            .history-subtle { font-size: 12px; color: var(--subtle); }
         </style>
     </head>
     <body>
@@ -243,10 +254,10 @@ def index() -> HTMLResponse:
             </section>
             <aside id="history-wrapper">
                 <div id="history-resize"></div>
-                <div id="history-panel">
+                    <div id="history-panel">
                     <div id="history-header">
                         <div style="font-weight:600;">History</div>
-                        <button class="ghost" type="button" onclick="loadHistory()">Refresh</button>
+                        <button class="ghost" type="button" onclick="refreshHistory()">Refresh</button>
                     </div>
                     <div id="history-list"></div>
                 </div>
@@ -304,6 +315,10 @@ def index() -> HTMLResponse:
             let noteCache = [];
             let notesLoadedOnce = false;
             let sending = false;
+            let historyDayMeta = [];
+            let historyLoadedDays = {};
+            let expandedMonths = new Set();
+            let openHistoryDays = new Set();
 
             function deriveNoteTitle(text) {
                 if (!text) return "Untitled note";
@@ -707,61 +722,236 @@ def index() -> HTMLResponse:
                 }
             }
 
-            async function loadHistory() {
-                const res = await fetch('/api/messages?limit=50');
+            function isTodayDay(dayStr) {
+                const today = new Date().toISOString().slice(0, 10);
+                return dayStr === today;
+            }
+
+            function formatMonthLabel(monthStr) {
+                if (!monthStr) return "Unknown month";
+                try {
+                    const [y, m] = monthStr.split("-");
+                    const d = new Date(`${y}-${m}-01T00:00:00Z`);
+                    return d.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+                } catch (e) {
+                    return monthStr;
+                }
+            }
+
+            function createHistoryItem(m) {
+                const item = document.createElement('div');
+                item.className = 'item role-' + (m.role || 'system');
+                const ts = m.created_at ? new Date(m.created_at).toLocaleString() : '';
+                const roleEl = document.createElement('div');
+                roleEl.className = 'role';
+                roleEl.textContent = `${m.role} • ${ts}`;
+                const body = document.createElement('div');
+                body.className = 'history-body';
+                body.innerHTML = marked.parse(m.content || '');
+                const actions = document.createElement('div');
+                actions.className = 'actions';
+                const del = document.createElement('button');
+                del.textContent = '✕';
+                del.title = m.chunk_id ? 'Delete' : 'Delete unavailable';
+                del.disabled = !m.chunk_id;
+                del.onclick = () => m.chunk_id && deleteMessage(m.chunk_id, item);
+                const copyBtn = document.createElement('button');
+                copyBtn.textContent = 'Copy';
+                copyBtn.onclick = () => copyMessage(m.content);
+                actions.appendChild(del);
+                actions.appendChild(copyBtn);
+                item.appendChild(actions);
+                item.appendChild(roleEl);
+                item.appendChild(body);
+                const shouldCollapse = (m.content || '').length > 360 || (body.textContent || '').length > 360;
+                if (shouldCollapse) {
+                    body.classList.add('collapsed');
+                    const toggle = document.createElement('button');
+                    toggle.className = 'history-expand';
+                    toggle.textContent = 'Expand';
+                    toggle.onclick = () => {
+                        const collapsed = body.classList.toggle('collapsed');
+                        toggle.textContent = collapsed ? 'Expand' : 'Collapse';
+                    };
+                    item.appendChild(toggle);
+                }
+                return item;
+            }
+
+            function renderDayMessages(day, messages, container) {
+                if (!container) return;
+                container.innerHTML = '';
+                if (!messages || !messages.length) {
+                    const empty = document.createElement('div');
+                    empty.className = 'history-subtle';
+                    empty.textContent = 'No messages for this day.';
+                    container.appendChild(empty);
+                    return;
+                }
+                messages.forEach(m => container.appendChild(createHistoryItem(m)));
+            }
+
+            async function fetchHistoryDay(day) {
+                const res = await fetch(`/api/messages?day=${encodeURIComponent(day)}`);
+                if (!res.ok) throw new Error(`history fetch failed (${res.status})`);
                 const data = await res.json();
-                if (historyList) {
-                    historyList.innerHTML = '';
-                    const messages = data.messages || [];
-                    if (!messages.length) {
-                        const empty = document.createElement('div');
-                        empty.className = 'item';
-                        empty.textContent = 'No history yet.';
-                        historyList.appendChild(empty);
-                        return;
-                    }
-                    messages.forEach(m => {
-                        const item = document.createElement('div');
-                        item.className = 'item role-' + (m.role || 'system');
-                        const ts = m.created_at ? new Date(m.created_at).toLocaleString() : '';
-                        const roleEl = document.createElement('div');
-                        roleEl.className = 'role';
-                        roleEl.textContent = `${m.role} • ${ts}`;
+                const msgs = data.messages || [];
+                historyLoadedDays[day] = msgs;
+                return msgs;
+            }
+
+            function groupDaysByMonth(days) {
+                const buckets = {};
+                (days || []).forEach(d => {
+                    const month = (d.day || '').slice(0, 7);
+                    if (!month) return;
+                    if (!buckets[month]) buckets[month] = [];
+                    buckets[month].push(d);
+                });
+                const order = Object.keys(buckets).sort().reverse();
+                return order.map(month => ({
+                    month,
+                    days: buckets[month].sort((a, b) => {
+                        if (a.day === b.day) return 0;
+                        return a.day < b.day ? 1 : -1;
+                    }),
+                }));
+            }
+
+            function renderHistoryDays() {
+                if (!historyList) return;
+                historyList.innerHTML = '';
+                if (!historyDayMeta.length) {
+                    const empty = document.createElement('div');
+                    empty.className = 'history-subtle';
+                    empty.textContent = 'No history yet.';
+                    historyList.appendChild(empty);
+                    return;
+                }
+                const grouped = groupDaysByMonth(historyDayMeta);
+                grouped.forEach(group => {
+                    const monthWrap = document.createElement('div');
+                    monthWrap.className = 'history-month';
+                    const monthHeader = document.createElement('div');
+                    monthHeader.className = 'history-month-header';
+                    const monthLabel = document.createElement('div');
+                    monthLabel.className = 'history-month-title';
+                    monthLabel.textContent = formatMonthLabel(group.month);
+                    const monthCount = document.createElement('div');
+                    monthCount.className = 'history-month-count';
+                    const totalCount = group.days.reduce((acc, d) => acc + (d.count || 0), 0);
+                    monthCount.textContent = `${totalCount} message${totalCount === 1 ? '' : 's'}`;
+                    monthHeader.appendChild(monthLabel);
+                    monthHeader.appendChild(monthCount);
+                    monthHeader.onclick = () => toggleMonth(group.month);
+                    monthWrap.appendChild(monthHeader);
+                    const daysWrap = document.createElement('div');
+                    daysWrap.className = 'history-days';
+                    daysWrap.dataset.month = group.month;
+                    daysWrap.style.display = expandedMonths.has(group.month) ? 'flex' : 'none';
+                    group.days.forEach(d => {
+                        const dayWrap = document.createElement('div');
+                        dayWrap.className = 'history-day';
+                        dayWrap.dataset.day = d.day;
+                        const dayHeader = document.createElement('div');
+                        dayHeader.className = 'history-day-header';
+                        const label = document.createElement('div');
+                        label.className = 'history-day-label';
+                        label.textContent = isTodayDay(d.day) ? `Today (${d.day})` : d.day;
+                        const count = document.createElement('div');
+                        count.className = 'history-day-count';
+                        count.textContent = `${d.count || 0} message${(d.count || 0) === 1 ? '' : 's'}`;
+                        dayHeader.appendChild(label);
+                        dayHeader.appendChild(count);
+                        dayHeader.onclick = () => toggleDay(d.day);
                         const body = document.createElement('div');
-                        body.className = 'history-body';
-                        body.innerHTML = marked.parse(m.content || '');
-                        const actions = document.createElement('div');
-                        actions.className = 'actions';
-                        const del = document.createElement('button');
-                        del.textContent = '✕';
-                        del.title = m.chunk_id ? 'Delete' : 'Delete unavailable';
-                        del.disabled = !m.chunk_id;
-                        del.onclick = () => m.chunk_id && deleteMessage(m.chunk_id, item);
-                        const copyBtn = document.createElement('button');
-                        copyBtn.textContent = 'Copy';
-                        copyBtn.onclick = () => copyMessage(m.content);
-                        actions.appendChild(del);
-                        actions.appendChild(copyBtn);
-                        item.appendChild(actions);
-                        item.appendChild(roleEl);
-                        item.appendChild(body);
-                        const shouldCollapse = (m.content || '').length > 360 || (body.textContent || '').length > 360;
-                        if (shouldCollapse) {
-                            body.classList.add('collapsed');
-                            const toggle = document.createElement('button');
-                            toggle.className = 'history-expand';
-                            toggle.textContent = 'Expand';
-                            toggle.onclick = () => {
-                                const collapsed = body.classList.toggle('collapsed');
-                                toggle.textContent = collapsed ? 'Expand' : 'Collapse';
-                            };
-                            item.appendChild(toggle);
+                        body.className = 'history-day-body';
+                        if (openHistoryDays.has(d.day)) {
+                            dayWrap.classList.add('open');
+                            body.style.display = 'block';
+                            if (historyLoadedDays[d.day]) {
+                                renderDayMessages(d.day, historyLoadedDays[d.day], body);
+                            }
                         }
-                        historyList.appendChild(item);
+                        dayWrap.appendChild(dayHeader);
+                        dayWrap.appendChild(body);
+                        daysWrap.appendChild(dayWrap);
                     });
+                    monthWrap.appendChild(daysWrap);
+                    historyList.appendChild(monthWrap);
+                });
+            }
+
+            function toggleMonth(month) {
+                if (expandedMonths.has(month)) {
+                    expandedMonths.delete(month);
                 } else {
-                    logEl.innerHTML = '';
-                    (data.messages || []).forEach(m => renderMessage(m.role, m.content, m.chunk_id, m.created_at, m.debug, m.metadata));
+                    expandedMonths.add(month);
+                }
+                renderHistoryDays();
+            }
+
+            async function toggleDay(day, forceOpen = false) {
+                if (!historyList) return;
+                const dayEl = historyList.querySelector(`[data-day="${day}"]`);
+                if (!dayEl) return;
+                const body = dayEl.querySelector('.history-day-body');
+                const isOpen = openHistoryDays.has(day);
+                if (isOpen && !forceOpen) {
+                    openHistoryDays.delete(day);
+                    dayEl.classList.remove('open');
+                    body.style.display = 'none';
+                    body.innerHTML = '';
+                    return;
+                }
+                openHistoryDays.add(day);
+                dayEl.classList.add('open');
+                body.style.display = 'block';
+                if (!historyLoadedDays[day]) {
+                    body.innerHTML = '<div class="history-subtle">Loading...</div>';
+                    try {
+                        const msgs = await fetchHistoryDay(day);
+                        renderDayMessages(day, msgs, body);
+                    } catch (e) {
+                        console.warn('history day load failed', e);
+                        body.innerHTML = '<div class="history-subtle">Failed to load.</div>';
+                    }
+                } else {
+                    renderDayMessages(day, historyLoadedDays[day], body);
+                }
+            }
+
+            async function openDay(day) {
+                const month = (day || '').slice(0, 7);
+                if (month) expandedMonths.add(month);
+                renderHistoryDays();
+                await toggleDay(day, true);
+            }
+
+            async function loadHistory(autoExpand = true) {
+                if (historyList) {
+                    historyList.innerHTML = '<div class="history-subtle">Loading history…</div>';
+                }
+                try {
+                    const res = await fetch('/api/messages/days');
+                    const data = await res.json();
+                    historyDayMeta = data.days || [];
+                    if (!expandedMonths.size && historyDayMeta.length) {
+                        const todayMonth = new Date().toISOString().slice(0, 7);
+                        const hasToday = historyDayMeta.some(d => d.day && d.day.startsWith(todayMonth));
+                        if (hasToday) expandedMonths.add(todayMonth);
+                    }
+                    renderHistoryDays();
+                    if (autoExpand && historyDayMeta.length) {
+                        const today = new Date().toISOString().slice(0, 10);
+                        const preferred = historyDayMeta.find(d => d.day === today)?.day || historyDayMeta[0].day;
+                        if (preferred) {
+                            await openDay(preferred);
+                        }
+                    }
+                } catch (e) {
+                    console.warn('history load failed', e);
+                    if (historyList) historyList.innerHTML = '<div class="history-subtle">History unavailable.</div>';
                 }
             }
 
@@ -770,11 +960,23 @@ def index() -> HTMLResponse:
                 document.body.classList.toggle('debug-mode', on);
             }
 
+            function refreshHistory() {
+                historyLoadedDays = {};
+                historyDayMeta = [];
+                openHistoryDays = new Set();
+                expandedMonths = new Set();
+                loadHistory(true);
+            }
+
             function toggleHistory() {
                 if (noteMode) return;
                 historyOpen = !historyOpen;
                 document.body.classList.toggle('show-history', historyOpen);
                 if (historyOpen) {
+                    historyLoadedDays = {};
+                    historyDayMeta = [];
+                    openHistoryDays = new Set();
+                    expandedMonths = new Set();
                     loadHistory();
                     if (historyBtn) historyBtn.textContent = 'Hide history';
                 } else {
@@ -903,8 +1105,22 @@ async def upload_note_asset(file: UploadFile = File(...)) -> dict:
 
 
 @app.get("/api/messages")
-def get_messages(limit: int = 50) -> dict:
-    msgs: List[Message] = workspace.list_recent(limit)
+def get_messages(day: str | None = None, limit: int = 50, mode: str | None = None) -> dict:
+    """
+    Fetch messages. Default: messages from today.
+    mode=recent (or day=all) preserves old behavior of last-N messages.
+    """
+    day = (day or "").strip()
+    mode = (mode or "").strip().lower()
+    if mode == "recent" or day.lower() == "all":
+        msgs: List[Message] = workspace.list_recent(limit)
+    else:
+        target_day = day or datetime.now(UTC).date().isoformat()
+        try:
+            parsed = datetime.fromisoformat(target_day).date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid day; expected YYYY-MM-DD")
+        msgs = workspace.list_messages_by_day(parsed.isoformat(), limit=limit)
     def _ts(msg: Message) -> float:
         dt = msg.created_at
         if dt.tzinfo:
@@ -912,6 +1128,12 @@ def get_messages(limit: int = 50) -> dict:
         return dt.replace(tzinfo=UTC).timestamp()
     msgs = sorted(msgs, key=_ts)
     return {"messages": [msg_to_dict(m) for m in msgs]}
+
+
+@app.get("/api/messages/days")
+def get_message_days(limit: int = 180) -> dict:
+    days = workspace.list_message_days(limit=limit)
+    return {"days": days}
 
 
 @app.delete("/api/messages/{chunk_id}")
