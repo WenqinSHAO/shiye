@@ -1,6 +1,25 @@
 import json
 import re
 import sqlite3
+
+# Check if the standard sqlite3 has FTS5 support
+_has_fts5 = False
+try:
+    _conn = sqlite3.connect(':memory:')
+    _cur = _conn.cursor()
+    _cur.execute('PRAGMA compile_options')
+    _has_fts5 = any('FTS5' in row[0] for row in _cur.fetchall())
+    _conn.close()
+except Exception:
+    pass
+
+# If standard sqlite3 doesn't have FTS5, try pysqlite3
+if not _has_fts5:
+    try:
+        import pysqlite3.dbapi2 as sqlite3  # FTS5-enabled SQLite
+    except ImportError:
+        pass  # Keep using standard sqlite3
+
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -201,9 +220,11 @@ class LocalStore:
                 else:
                     # Test FTS5 support before attempting to create
                     try:
-                        cur.execute("SELECT fts5_version()")
-                        fts5_version = cur.fetchone()[0]
-                        print(f"[info] FTS5 version: {fts5_version}")
+                        cur.execute("PRAGMA compile_options")
+                        compile_options = [row[0] for row in cur.fetchall()]
+                        if not any('FTS5' in opt for opt in compile_options):
+                            raise Exception("FTS5 not enabled in compile options")
+                        print(f"[info] FTS5 is available")
                     except Exception as e:
                         print(f"[ERROR] FTS5 is not available in this SQLite build: {e}")
                         print("[ERROR] Sparse search will not be available. Please upgrade SQLite with FTS5 support.")
