@@ -61,6 +61,7 @@
 ## Next Steps (Prioritized)
 
 ### Phase 1: Polish Current Features (v0.5)
+
 **Goal**: Make existing features production-ready
 
 1. **UI Resilience**
@@ -69,34 +70,205 @@
    - [ ] Improve loading states and error messages
    - [ ] Add toast notifications for background operations
 
-2. **Semantic Search UX**
-   - [ ] Add dedicated search interface in web UI
-   - [ ] Expose semantic search as first-class action (not just implicit in context)
-   - [ ] Add filters: date range, document type, tags
-   - [ ] Show search results with relevance scores
-
-3. **Note Improvements**
-   - [ ] Add search/filter in note list
+2. **Note Improvements**
    - [ ] Implement autosave with conflict resolution
-   - [ ] Add note tagging and categorization
-   - [ ] Export notes to markdown files
+   - [ ] Autosave when going back to chat mode
 
 ### Phase 2: Enhanced Retrieval (v0.7)
-**Goal**: Better context assembly and grounding
 
-1. **Multi-cue Retrieval**
-   - [ ] Combine semantic + time filters + focus topics
-   - [ ] Implement reranking with combined scores
-   - [ ] Add focus-topic pinning mechanism
-   - [ ] Support explicit "reset context" command
+**Goal**: Hybrid retrieval with multi-cue scoring and traceable results  
+**Reference**: See [Retrieval.md](Retrieval.md) for detailed design specifications
 
-2. **Timeline Features**
-   - [ ] Timeline view for stored content
-   - [ ] Filter by date range in chat
-   - [ ] Show temporal context in responses
-   - [ ] Better event_at extraction from content
+#### Phase 2.1: Foundation (Schema + FTS5)
+
+**Objective**: Extend schema for citation offsets and sparse search
+
+1. **Schema Migration** [storage.py]
+   - [ ] Add columns to `chunks`: `char_start`, `char_end`, `embedding_model`, `chunk_window`
+   - [ ] Create `chunks_fts` FTS5 virtual table for BM25 keyword search
+   - [ ] Add INSERT/UPDATE triggers to sync chunks → chunks_fts
+   - [ ] Implement `storage.py: _migrate_schema_v2()` with idempotency check
+   - [ ] Test: Verify new columns exist, FTS5 table queryable
+
+2. **Update Ingestion** [storage.py, handlers.py]
+   - [ ] Modify `add_messages()` to accept and store `char_start`/`char_end` per chunk
+   - [ ] Update chunking logic to calculate character offsets during split
+   - [ ] Store current `SHIYE_EMBED_MODEL` value in `embedding_model` column
+   - [ ] Populate `chunks_fts` on every chunk insert
+   - [ ] Test: Add document, verify FTS5 contains searchable text
+
+#### Phase 2.2: Hybrid Retrieval + Fusion
+
+**Objective**: Combine dense (FAISS) + sparse (FTS5) with RRF fusion
+
+3. **Dataclasses and Types** [new retrieval.py module]
+   - [ ] Create `SearchRequest` dataclass (query, filters, top_k, enable_rerank, etc.)
+   - [ ] Create `Candidate` dataclass (chunk_id, score, channel, metadata)
+   - [ ] Create `SearchHit` dataclass (full result with provenance)
+   - [ ] Add `Reranker` Protocol interface
+   - [ ] Add `PostProcessor` Protocol interface
+   - [ ] Test: Import dataclasses in storage.py and workspace.py
+
+4. **Dense Retrieval Refactor** [storage.py]
+   - [ ] Refactor `recall()` into `_dense_retrieval(request: SearchRequest) -> List[Candidate]`
+   - [ ] FAISS over-retrieve (top 500), then filter by `deleted=0` and metadata
+   - [ ] Apply filters: `doc_type`, `before`/`after` timestamps, `tags`
+   - [ ] Return `Candidate` objects with channel='dense'
+   - [ ] Test: Verify dense search with filters returns correct chunks
+
+5. **Sparse Retrieval (FTS5)** [storage.py]
+   - [ ] Implement `_sparse_retrieval(request: SearchRequest) -> List[Candidate]`
+   - [ ] Query `chunks_fts` with FTS5 MATCH syntax
+   - [ ] Normalize BM25 scores (negative → positive 0-1 range)
+   - [ ] Apply same metadata filters as dense retrieval
+   - [ ] Return `Candidate` objects with channel='sparse'
+   - [ ] Test: FTS5 search for keywords returns relevant chunks
+
+6. **Multi-Retriever Orchestration** [storage.py]
+   - [ ] Implement `search_hybrid(request) -> List[List[Candidate]]`
+   - [ ] Run `_dense_retrieval()` and `_sparse_retrieval()` 
+   - [ ] Optional: Implement `_exact_match_retrieval()` for regex/substring
+   - [ ] Return separate candidate lists per channel
+   - [ ] Test: Verify both retrievers return non-overlapping + overlapping results
+
+7. **RRF Fusion** [storage.py]
+   - [ ] Implement `_fuse_rrf(retriever_results, k=60) -> List[Candidate]`
+   - [ ] Compute reciprocal rank fusion: score = sum(1/(k+rank)) across channels
+   - [ ] Update Candidate.score to RRF score, set channel='fused'
+   - [ ] Test: Verify chunks appearing in both retrievers rank higher
+
+#### Phase 2.3: Reranking
+
+**Objective**: Add cross-encoder reranking for top candidates
+
+8. **Reranker Interface** [retrieval.py]
+   - [ ] Define `Reranker` Protocol with `rerank(query, candidates, store)` method
+   - [ ] Implement `FlashRankReranker` class using flashrank library
+   - [ ] Handle top-N candidate selection (rerank only top 50)
+   - [ ] Add config: `SHIYE_RERANKER` env var ('flashrank', 'bge', 'none')
+   - [ ] Test: Unit test FlashRankReranker with mock candidates
+
+9. **Reranker Integration** [storage.py, config.py]
+   - [ ] Add `flashrank>=0.2.0` to requirements.txt
+   - [ ] Add `reranker: Optional[Reranker]` parameter to LocalStore.__init__
+   - [ ] Initialize reranker based on `SHIYE_RERANKER` config
+   - [ ] Call `reranker.rerank()` in `search()` pipeline after fusion
+   - [ ] Update Candidate.channel='rerank' and scores
+   - [ ] Test: End-to-end search with reranking enabled/disabled
+
+10. **Helper Methods** [storage.py]
+    - [ ] Implement `get_chunk(chunk_id) -> StoredChunk` for single chunk retrieval
+    - [ ] Implement `get_document(doc_id) -> dict` for document metadata
+    - [ ] Test: Fetch chunk by ID, verify all fields present
+
+#### Phase 2.4: Post-Processing (Multi-Cue Scoring)
+
+**Objective**: Add recency boosts, type preferences, exact matching, deduplication
+
+11. **Post-Processor Implementations** [retrieval.py]
+    - [ ] Implement `RecencyBooster(decay_days=30, boost_factor=0.2)`
+    - [ ] Implement `TypeBooster(boosts={'note':1.2, 'web_page':1.1, ...})`
+    - [ ] Implement `ExactMatchBooster(boost_factor=1.5)` for query phrase hits
+    - [ ] Implement `Deduplicator(mode='by_doc')` to keep best chunk per document
+    - [ ] Test: Each post-processor independently with mock candidates
+
+12. **Post-Processor Pipeline** [storage.py]
+    - [ ] Add post-processor chain in `search()` method
+    - [ ] Apply processors conditionally based on SearchRequest flags
+    - [ ] Chain: RecencyBooster → TypeBooster → ExactMatchBooster → Deduplicator
+    - [ ] Test: Full pipeline, verify score changes and deduplication
+
+#### Phase 2.5: Context Assembly & UI
+
+**Objective**: Expose search via UI and provide citeable context to LLM
+
+13. **Context Packer** [retrieval.py]
+    - [ ] Implement `ContextPacker(max_tokens=8000)` class
+    - [ ] Implement `pack(hits, query) -> dict` with token budget enforcement
+    - [ ] Return structured context with citation_ids for LLM prompts
+    - [ ] Test: Pack 20 hits, verify token budget not exceeded
+
+14. **Workspace Integration** [workspace.py]
+    - [ ] Add `search(request: SearchRequest) -> List[SearchHit]` method
+    - [ ] Convert `Candidate` → `SearchHit` with full metadata fetch
+    - [ ] Use `store.get_chunk()` and `store.get_document()` for provenance
+    - [ ] Populate SearchHit with scores, timestamps, offsets, source refs
+    - [ ] Test: Call workspace.search(), verify SearchHit completeness
+
+15. **Web UI: /find Command** [web.py]
+    - [ ] Add `/find <query>` command detection in chat_endpoint
+    - [ ] Implement `handle_search(query)` function
+    - [ ] Parse query for filters: `type:note`, `tag:project`, `before:date`, `after:date`
+    - [ ] Call `workspace.search(SearchRequest(...))` and format results as HTML
+    - [ ] Display: doc_type, relevance score, timestamp, title, text preview, source link
+    - [ ] Add CSS styling for `.search-results`, `.search-hit` classes
+    - [ ] Test: Web UI manual test with various queries and filters
+
+16. **Orchestrator Integration** [orchestrator.py]
+    - [ ] Replace `workspace.recall()` with `workspace.search()` for context retrieval
+    - [ ] Use `ContextPacker` to assemble token-aware context
+    - [ ] Include citation_id in LLM prompts (e.g., "[1] note from 2024-12-15: ...")
+    - [ ] Test: Chat with context, verify LLM receives properly formatted citations
+
+#### Phase 2.6: Testing & Documentation
+
+**Objective**: Comprehensive tests and updated documentation
+
+17. **Unit Tests** [tests/test_retrieval.py - new file]
+    - [ ] Test FTS5 sparse search with keywords
+    - [ ] Test RRF fusion with mock retriever results
+    - [ ] Test FlashRankReranker with sample candidates
+    - [ ] Test each post-processor (recency, type, exact, dedupe)
+    - [ ] Test schema migration idempotency (run twice, no errors)
+    - [ ] Test SearchRequest filter parsing
+
+18. **Integration Tests** [tests/test_storage.py]
+    - [ ] End-to-end: add document → search with filters → verify results
+    - [ ] Test filter combinations: type + time range, tags + recency
+    - [ ] Test search with reranking enabled vs disabled
+    - [ ] Test deduplication (multiple chunks from same doc)
+    - [ ] Test context packer with token limits
+
+19. **Evaluation Framework** [eval/retrieval_eval.py - new file]
+    - [ ] Create `eval/golden_queries.json` with 20-50 test queries
+    - [ ] Format: `{query, expected_doc_ids, expected_types, time_constraint}`
+    - [ ] Implement `evaluate_retrieval()` function
+    - [ ] Compute metrics: Recall@5, Recall@10, MRR (Mean Reciprocal Rank)
+    - [ ] Run baseline evaluation and save results to eval/results_v0.7.json
+    - [ ] Document: Create eval/EVALUATION.md with methodology and results
+
+20. **Documentation Updates**
+    - [ ] Update README.md: Add `/find` command to "Web UI Commands" section
+    - [ ] Update README.md: Add "Search" section explaining hybrid retrieval
+    - [ ] Update TODO.md: Mark Phase 2.1-2.6 tasks as completed
+    - [ ] Add code comments: Docstrings for all new methods in storage.py, retrieval.py
+    - [ ] Create CHANGELOG.md: Document v0.7 changes and breaking changes (if any)
+
+#### Phase 2.7: Optional Enhancements (Time Permitting)
+
+21. **Timeline Features**
+    - [ ] Timeline view UI for stored content (visual timeline of chunks by date)
+    - [ ] Enhanced date range filtering in /find (natural language: "last week")
+    - [ ] Show temporal context in chat responses (e.g., "from your notes 3 days ago")
+    - [ ] Better event_at extraction from content (NLP-based date extraction)
+
+22. **Focus Topics** (defer to v0.8 if not completed)
+    - [ ] Focus-topic pinning mechanism (persist user-selected focus areas)
+    - [ ] Boost chunks matching active focus topics
+    - [ ] Support explicit "reset context" command to clear focus
+
+---
+
+**Phase 2 Success Criteria**:
+- ✅ `/find` command works in web UI with filters
+- ✅ Hybrid retrieval (dense + sparse) active
+- ✅ Reranking improves top-5 result quality
+- ✅ Search results show scores, timestamps, citations
+- ✅ All tests pass (unit + integration)
+- ✅ Recall@10 > 0.7 on golden query set
 
 ### Phase 3: Extended Ingest (v0.9)
+
 **Goal**: Support more content types
 
 1. **File Support**
@@ -112,6 +284,7 @@
    - [ ] Progress tracking for large imports
 
 ### Phase 4: Tool Execution (v1.0)
+
 **Goal**: Enable micro-automation
 
 1. **Safe Execution**
@@ -125,20 +298,6 @@
    - [ ] Version control for tools
    - [ ] Share tools between sessions
    - [ ] Tool discovery and suggestions
-
-### Phase 5: Multi-Model Support (v1.2)
-**Goal**: Flexible LLM backends
-
-1. **Provider Abstraction**
-   - [ ] Abstract LLM interface in orchestrator
-   - [ ] Support OpenAI, Anthropic, local models
-   - [ ] Model routing (cheap vs smart)
-   - [ ] Fallback chains for reliability
-
-2. **Offline Mode**
-   - [ ] Local model support (llama.cpp, ollama)
-   - [ ] Graceful degradation without API
-   - [ ] Offline-first features
 
 ### Future (v2.0+)
 
