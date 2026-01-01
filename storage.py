@@ -194,7 +194,11 @@ class LocalStore:
                 cursor = cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='chunks_fts'")
                 fts_exists = cursor.fetchone() is not None
                 
-                if not fts_exists:
+                if fts_exists:
+                    # Table already exists, mark FTS5 as available
+                    self._fts5_available = True
+                    print("[info] FTS5 table already exists")
+                else:
                     # Test FTS5 support before attempting to create
                     try:
                         cur.execute("SELECT fts5_version()")
@@ -228,6 +232,8 @@ class LocalStore:
                         WHERE c.deleted = 0
                     """)
                     print("[info] Created FTS5 table and populated with existing chunks")
+                    # Mark FTS5 as available since we just created it
+                    self._fts5_available = True
                 
                 # Check and create triggers independently (they may be missing even if table exists)
                 # Check if triggers exist
@@ -280,8 +286,6 @@ class LocalStore:
                     """)
                     print("[info] Created chunks_fts_update trigger")
                 
-                # Mark FTS5 as available if we got this far
-                self._fts5_available = True
                 print("[info] Schema migration v2 completed successfully")
         except Exception as e:
             print(f"[ERROR] Schema migration v2 failed: {e}")
