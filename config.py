@@ -11,6 +11,7 @@ VECTOR_DIM_ENV = os.getenv("SHIYE_VECTOR_DIM")  # allow override when swapping m
 # Retrieval settings (v0.7)
 SHIYE_RERANKER = os.getenv("SHIYE_RERANKER", "flashrank")  # 'flashrank', 'bge', 'none'
 SHIYE_RERANK_TOP_K = int(os.getenv("SHIYE_RERANK_TOP_K", "50"))
-SHIYE_SEARCH_TOP_K = int(os.getenv("SHIYE_SEARCH_TOP_K", "20"))
+SHIYE_SEARCH_TOP_K = int(os.getenv("SHIYE_SEARCH_TOP_K", "5"))
 SHIYE_RRF_K = int(os.getenv("SHIYE_RRF_K", "60"))  # RRF constant
 SHIYE_RECENCY_DECAY_DAYS = int(os.getenv("SHIYE_RECENCY_DECAY_DAYS", "30"))
+SHIYE_DEBUG_RETRIEVAL = os.getenv("SHIYE_DEBUG_RETRIEVAL", "false").lower() == "true"

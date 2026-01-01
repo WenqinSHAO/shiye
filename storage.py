@@ -24,7 +24,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -33,6 +33,19 @@ from datatypes import Message, Role, ensure_utc
 from embeddings import EmbeddingProvider
 from vector_store import FaissIndex, faiss
 from retrieval import SearchRequest, Candidate, Reranker, RecencyBooster, TypeBooster, ExactMatchBooster, Deduplicator
+
+# Order to present score components in debug output and UI
+SCORE_BREAKDOWN_ORDER = [
+    "dense",
+    "sparse",
+    "exact",
+    "fused",
+    "rerank",
+    "recency_boost",
+    "type_boost",
+    "exact_match_boost",
+    "final",
+]
 
 
 @dataclass
@@ -86,6 +99,57 @@ class LocalStore:
                 self._faiss_index = FaissIndex(dim=self.embedder.dim)
             except Exception as e:
                 print(f"[warn] Embedding index unavailable: {e}")
+
+    def _init_debug_info(self, request: SearchRequest) -> dict:
+        """Prepare structured debug info for the retrieval pipeline."""
+        debug_info = {
+            "query": request.query,
+            "filters": request.filters,
+            "queries": {
+                "raw": request.query,
+                "dense": {"query": request.query, "filters": request.filters},
+                "sparse": {"query": request.query, "filters": request.filters},
+                "exact": {"query": request.query, "filters": request.filters},
+            },
+            "stages": {
+                "dense": {"retrieved": 0, "after_filters": 0},
+                "sparse": {"retrieved": 0},
+                "exact": {"retrieved": 0},
+                "fusion": {"unique": 0},
+                "rerank": {"applied": False, "top_k": 0},
+                "post_processors": [],
+                "final": {"returned": 0},
+            },
+            "score_keys": SCORE_BREAKDOWN_ORDER,
+            "candidates": [],
+            # Legacy fields kept for templates/UI that expect them
+            "dense_query": request.query,
+            "dense_results_count": 0,
+            "dense_filtered_count": 0,
+            "sparse_query": request.query,
+            "sparse_results_count": 0,
+            "exact_query": request.query,
+            "exact_results_count": 0,
+            "fused_count": 0,
+            "reranked": False,
+            "rerank_count": 0,
+            "post_processors": [],
+            "final_count": 0,
+            "top_candidates": [],
+        }
+        self._last_debug_info = debug_info
+        return debug_info
+
+    def _format_score_history(self, score_history: Dict[str, float]) -> List[Dict[str, float]]:
+        """Return score history as an ordered list for UI display."""
+        ordered = []
+        for key in SCORE_BREAKDOWN_ORDER:
+            if key in score_history:
+                ordered.append({"stage": key, "value": score_history[key]})
+        for key, value in score_history.items():
+            if key not in SCORE_BREAKDOWN_ORDER:
+                ordered.append({"stage": key, "value": value})
+        return ordered
 
     @contextmanager
     def _connect(self):
@@ -911,6 +975,12 @@ class LocalStore:
     
     def _dense_retrieval(self, request: SearchRequest) -> List[Candidate]:
         """FAISS semantic search with metadata post-filtering."""
+        from config import SHIYE_DEBUG_RETRIEVAL
+        
+        if SHIYE_DEBUG_RETRIEVAL:
+            print(f"\n[DEBUG] Dense Retrieval Query: '{request.query}'")
+            print(f"[DEBUG] Filters: {request.filters}")
+        
         if not self.embedder or not self._faiss_index:
             return []
         
@@ -976,6 +1046,9 @@ class LocalStore:
         results = []
         score_map = dict(zip(chunk_ids, scores))
         
+        if SHIYE_DEBUG_RETRIEVAL:
+            print(f"[DEBUG] Dense retrieval: {len(chunk_ids)} FAISS results, {len(rows)} after filtering")
+        
         # Determine which timestamp field to use based on filter
         time_field = request.filters.get('time_field', 'created_at')
         
@@ -1003,10 +1076,34 @@ class LocalStore:
                 score_history={'dense': float(score_map[row['id']])}
             ))
         
-        return sorted(results, key=lambda x: x.score, reverse=True)[:request.top_k * 2]
+        results_sorted = sorted(results, key=lambda x: x.score, reverse=True)[:request.top_k * 2]
+        
+        if request.debug and getattr(self, '_last_debug_info', None) is not None:
+            debug_info = self._last_debug_info
+            debug_info['dense_query'] = request.query
+            if "queries" in debug_info:
+                debug_info["queries"]["dense"] = {"query": request.query, "filters": request.filters}
+            if "stages" in debug_info:
+                debug_info["stages"]["dense"]["retrieved"] = len(chunk_ids) if chunk_ids else 0
+                debug_info["stages"]["dense"]["after_filters"] = len(results_sorted)
+            debug_info['dense_results_count'] = len(chunk_ids) if chunk_ids else 0
+            debug_info['dense_filtered_count'] = len(results_sorted)
+        
+        if SHIYE_DEBUG_RETRIEVAL and results_sorted:
+            print(f"[DEBUG] Dense top-5 scores:")
+            for i, c in enumerate(results_sorted[:5], 1):
+                print(f"  {i}. chunk_id={c.chunk_id}, score={c.score:.4f}, doc_type={c.doc_type}")
+        
+        return results_sorted
     
     def _sparse_retrieval(self, request: SearchRequest) -> List[Candidate]:
         """SQLite FTS5 BM25 search."""
+        from config import SHIYE_DEBUG_RETRIEVAL
+        
+        if SHIYE_DEBUG_RETRIEVAL:
+            print(f"\n[DEBUG] Sparse Retrieval Query: '{request.query}'")
+            print(f"[DEBUG] Filters: {request.filters}")
+        
         # Skip sparse retrieval if FTS5 is not available
         if not self._fts5_available:
             return []
@@ -1017,7 +1114,7 @@ class LocalStore:
             SELECT 
                 f.chunk_id,
                 f.text,
-                bm25(f) as score,
+                bm25(chunks_fts) as score,
                 c.document_id,
                 c.created_at,
                 c.event_at,
@@ -1025,10 +1122,10 @@ class LocalStore:
                 f.doc_type,
                 c.tags as chunk_tags,
                 d.tags as doc_tags
-            FROM chunks_fts f
+            FROM chunks_fts AS f
             JOIN chunks c ON f.chunk_id = c.id
             JOIN documents d ON c.document_id = d.id
-            WHERE chunks_fts MATCH ?
+            WHERE f MATCH ?
               AND c.deleted = 0
             """
             
@@ -1060,7 +1157,7 @@ class LocalStore:
                 params.append(tag_pattern)
                 params.append(tag_pattern)
             
-            sql += " ORDER BY bm25(f) LIMIT ?"
+            sql += " ORDER BY bm25(chunks_fts) LIMIT ?"
             params.append(request.top_k * 2)
             
             try:
@@ -1102,6 +1199,21 @@ class LocalStore:
                 score_history={'sparse': normalized_score}
             ))
         
+        if request.debug and getattr(self, '_last_debug_info', None) is not None:
+            debug_info = self._last_debug_info
+            debug_info['sparse_query'] = request.query
+            if "queries" in debug_info:
+                debug_info["queries"]["sparse"] = {"query": request.query, "filters": request.filters}
+            if "stages" in debug_info:
+                debug_info["stages"]["sparse"]["retrieved"] = len(results)
+            debug_info['sparse_results_count'] = len(results)
+        
+        if SHIYE_DEBUG_RETRIEVAL and results:
+            print(f"[DEBUG] Sparse retrieval: {len(results)} results")
+            print(f"[DEBUG] Sparse top-5 scores:")
+            for i, c in enumerate(results[:5], 1):
+                print(f"  {i}. chunk_id={c.chunk_id}, score={c.score:.4f}, doc_type={c.doc_type}")
+        
         return results
     
     def search_hybrid(self, request: SearchRequest) -> List[List[Candidate]]:
@@ -1121,6 +1233,7 @@ class LocalStore:
         where k=60 is standard constant, rank is 1-indexed position.
         """
         from collections import defaultdict
+        from config import SHIYE_DEBUG_RETRIEVAL
         
         rrf_scores = defaultdict(float)
         chunk_map = {}  # chunk_id -> best Candidate object
@@ -1145,11 +1258,36 @@ class LocalStore:
             candidate.score_history['fused'] = rrf_score
             fused.append(candidate)
         
+        if getattr(self, '_last_debug_info', None) is not None:
+            self._last_debug_info['fused_count'] = len(fused)
+            if "stages" in self._last_debug_info:
+                self._last_debug_info["stages"]["fusion"]["unique"] = len(fused)
+        
+        if SHIYE_DEBUG_RETRIEVAL and fused:
+            print(f"\n[DEBUG] RRF Fusion: {len(fused)} unique candidates")
+            print(f"[DEBUG] RRF top-5 fused scores:")
+            for i, c in enumerate(fused[:5], 1):
+                print(f"  {i}. chunk_id={c.chunk_id}, rrf_score={c.score:.4f}, history={c.score_history}")
+        
         return fused
     
     def search(self, request: SearchRequest) -> List[Candidate]:
         """Full search pipeline with hybrid retrieval, fusion, rerank, and post-processing."""
-        from config import SHIYE_RRF_K, SHIYE_RECENCY_DECAY_DAYS
+        from config import SHIYE_RRF_K, SHIYE_RECENCY_DECAY_DAYS, SHIYE_DEBUG_RETRIEVAL, SHIYE_RERANK_TOP_K
+        
+        # Initialize debug info if requested
+        debug_info = self._init_debug_info(request) if request.debug else None
+        if not request.debug:
+            self._last_debug_info = None
+        
+        if SHIYE_DEBUG_RETRIEVAL:
+            print(f"\n{'='*80}")
+            print(f"[DEBUG] SEARCH PIPELINE START")
+            print(f"[DEBUG] Query: '{request.query}'")
+            print(f"[DEBUG] Filters: {request.filters}")
+            print(f"[DEBUG] Top-K: {request.top_k}")
+            print(f"[DEBUG] Rerank: {request.enable_rerank}, Time Boost: {request.enable_time_boost}, Exact Boost: {request.enable_exact_boost}")
+            print(f"{'='*80}")
         
         # Stage B: Multi-retrieval
         retriever_results = self.search_hybrid(request)
@@ -1163,7 +1301,21 @@ class LocalStore:
         # Stage D: Reranking
         if request.enable_rerank and self.reranker:
             try:
+                rerank_top = min(SHIYE_RERANK_TOP_K, len(fused))
+                if SHIYE_DEBUG_RETRIEVAL:
+                    print(f"\n[DEBUG] Reranking top {rerank_top} candidates...")
                 fused = self.reranker.rerank(request.query, fused, self)
+                if request.debug and getattr(self, '_last_debug_info', None) is not None:
+                    debug_info = self._last_debug_info
+                    debug_info['reranked'] = True
+                    debug_info['rerank_count'] = rerank_top
+                    if "stages" in debug_info:
+                        debug_info["stages"]["rerank"]["applied"] = True
+                        debug_info["stages"]["rerank"]["top_k"] = rerank_top
+                if SHIYE_DEBUG_RETRIEVAL and fused:
+                    print(f"[DEBUG] Rerank top-5 scores:")
+                    for i, c in enumerate(fused[:5], 1):
+                        print(f"  {i}. chunk_id={c.chunk_id}, rerank_score={c.score:.4f}, history={c.score_history}")
             except Exception as e:
                 print(f"[warn] Reranking failed: {e}")
         
@@ -1178,12 +1330,70 @@ class LocalStore:
         result = fused
         for processor in post_processors:
             try:
+                if SHIYE_DEBUG_RETRIEVAL:
+                    print(f"\n[DEBUG] Applying {processor.__class__.__name__}...")
                 result = processor.process(request, result)
+                if request.debug and getattr(self, '_last_debug_info', None) is not None:
+                    debug_info = self._last_debug_info
+                    debug_info['post_processors'].append(processor.__class__.__name__)
+                    if "stages" in debug_info:
+                        debug_info["stages"]["post_processors"].append(processor.__class__.__name__)
+                if SHIYE_DEBUG_RETRIEVAL and result:
+                    print(f"[DEBUG] After {processor.__class__.__name__} top-5:")
+                    for i, c in enumerate(result[:5], 1):
+                        print(f"  {i}. chunk_id={c.chunk_id}, score={c.score:.4f}, history={c.score_history}")
             except Exception as e:
                 print(f"[warn] Post-processor {processor.__class__.__name__} failed: {e}")
+
+        # Track how many candidates received an exact-match boost
+        if request.debug and getattr(self, '_last_debug_info', None) is not None:
+            matches = sum(1 for c in result if 'exact_match_boost' in c.score_history)
+            self._last_debug_info['exact_results_count'] = matches
+            if "stages" in self._last_debug_info:
+                self._last_debug_info["stages"].setdefault("exact", {})
+                self._last_debug_info["stages"]["exact"]["retrieved"] = matches
         
         # Add final score to history
         for candidate in result:
             candidate.score_history['final'] = candidate.score
         
-        return result[:request.top_k]
+        final_results = result[:request.top_k]
+        
+        # Collect debug info for top candidates
+        if request.debug and getattr(self, '_last_debug_info', None) is not None:
+            debug_info = self._last_debug_info
+            debug_info['final_count'] = len(final_results)
+            if "stages" in debug_info:
+                debug_info["stages"]["final"]["returned"] = len(final_results)
+            debug_info['candidates'] = []
+            debug_info['top_candidates'] = []
+            for i, c in enumerate(final_results, 1):
+                preview = c.text_preview[:140] if c.text_preview else ""
+                score_history = dict(c.score_history)
+                candidate_entry = {
+                    'rank': i,
+                    'chunk_id': c.chunk_id,
+                    'doc_id': c.doc_id,
+                    'doc_type': c.doc_type,
+                    'final_score': c.score,
+                    'score_history': score_history,
+                    'score_trace': self._format_score_history(score_history),
+                    'text_preview': preview
+                }
+                debug_info['candidates'].append(candidate_entry)
+                if i <= 10:
+                    debug_info['top_candidates'].append(candidate_entry)
+        
+        if SHIYE_DEBUG_RETRIEVAL:
+            print(f"\n[DEBUG] FINAL RESULTS ({len(final_results)} candidates):")
+            for i, c in enumerate(final_results, 1):
+                print(f"  {i}. chunk_id={c.chunk_id}, doc_id={c.doc_id}, doc_type={c.doc_type}")
+                print(f"     Final Score: {c.score:.4f}")
+                print(f"     Score History: {c.score_history}")
+                preview = c.text_preview[:100] if c.text_preview else ""
+                print(f"     Text Preview: {preview}...")
+                print()
+            print(f"{'='*80}")
+            print(f"[DEBUG] SEARCH PIPELINE END\n")
+        
+        return final_results

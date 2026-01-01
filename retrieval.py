@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, UTC
 from typing import Dict, Any, List, Optional, Protocol
 from pathlib import Path
+import inspect
 
 from config import DATA_DIR, MODEL_NAME
 
@@ -17,6 +18,7 @@ class SearchRequest:
     enable_rerank: bool = True
     enable_time_boost: bool = True
     enable_exact_boost: bool = True
+    debug: bool = False  # Collect debug info for web UI
 
 
 @dataclass
@@ -59,6 +61,30 @@ class SearchHit:
     # Metadata
     tags: List[str]
     focus_hint: Optional[str]
+
+
+@dataclass
+class SearchDebugInfo:
+    """Debug information for retrieval pipeline."""
+    query: str = ""
+    filters: Dict[str, Any] = field(default_factory=dict)
+    dense_query: str = ""
+    dense_results_count: int = 0
+    dense_filtered_count: int = 0
+    sparse_query: str = ""
+    sparse_results_count: int = 0
+    exact_query: str = ""
+    exact_results_count: int = 0
+    fused_count: int = 0
+    reranked: bool = False
+    rerank_count: int = 0
+    post_processors: List[str] = field(default_factory=list)
+    final_count: int = 0
+    top_candidates: List[Dict[str, Any]] = field(default_factory=list)  # Detailed info for top candidates
+    queries: Dict[str, Any] = field(default_factory=dict)
+    stages: Dict[str, Any] = field(default_factory=dict)
+    score_keys: List[str] = field(default_factory=list)
+    candidates: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class Reranker(Protocol):
@@ -113,9 +139,29 @@ class FlashRankReranker:
         
         # Run reranker
         try:
-            reranked = self.ranker.rerank(query, passages)
+            sig = inspect.signature(self.ranker.rerank)
+            param_names = list(sig.parameters.keys())
+            reranked = None
+            if len(param_names) == 2:
+                # Newer FlashRank API: rerank(passages)
+                try:
+                    reranked = self.ranker.rerank(passages)
+                except TypeError:
+                    reranked = self.ranker.rerank(query, passages)
+            else:
+                # Older API: rerank(query, passages) or keyworded
+                try:
+                    reranked = self.ranker.rerank(query=query, documents=passages)
+                except TypeError:
+                    try:
+                        reranked = self.ranker.rerank(query, passages)
+                    except TypeError:
+                        reranked = self.ranker.rerank(passages)
         except Exception as e:
             print(f"[warn] Reranking failed: {e}")
+            return candidates
+        
+        if not reranked:
             return candidates
         
         # Update candidates with rerank scores

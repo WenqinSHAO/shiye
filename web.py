@@ -206,6 +206,26 @@ def index() -> HTMLResponse:
             .search-hit .hit-source { font-size: 12px; }
             .search-hit .hit-source a { color: var(--accent); text-decoration: none; }
             .search-hit .hit-source a:hover { text-decoration: underline; }
+            .hit-scores { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 8px; }
+            .hit-score-chips, .score-chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+            .score-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 8px; background: #eef3ff; border: 1px solid var(--border); font-size: 12px; color: var(--ink); }
+            .score-chip .score-label { font-weight: 700; letter-spacing: 0.04em; font-size: 11px; color: var(--subtle); text-transform: uppercase; }
+            .search-debug { margin-top: 20px; padding: 14px; background: #f8f9fa; border: 1px solid var(--border); border-radius: 8px; font-size: 12px; font-family: 'Monaco', 'Menlo', 'Courier New', monospace; }
+            .search-debug .debug-header { font-weight: 600; margin-bottom: 10px; color: var(--ink); cursor: pointer; user-select: none; }
+            .search-debug .debug-header:hover { color: var(--accent); }
+            .search-debug .debug-section { margin-bottom: 12px; }
+            .search-debug .debug-section-title { font-weight: 600; color: var(--subtle); margin-bottom: 4px; }
+            .search-debug .debug-item { padding: 4px 0; color: var(--ink); }
+            .search-debug .debug-candidate { padding: 8px; margin: 4px 0; background: white; border: 1px solid var(--border); border-radius: 4px; }
+            .search-debug .debug-candidate-header { font-weight: 600; margin-bottom: 4px; color: var(--ink); }
+            .search-debug .debug-score-history { margin-top: 4px; padding-left: 12px; }
+            .search-debug .debug-score-item { color: var(--subtle); }
+            .search-debug .debug-collapsed { display: none; }
+            .score-chart { margin-top: 8px; padding: 10px; background: white; border: 1px solid var(--border); border-radius: 8px; }
+            .score-chart svg { width: 100%; height: 180px; overflow: visible; }
+            .score-chart .legend { margin-top: 8px; display: flex; gap: 10px; flex-wrap: wrap; font-size: 11px; color: var(--subtle); }
+            .legend .swatch { display: inline-flex; align-items: center; gap: 6px; }
+            .legend .dot { width: 10px; height: 10px; border-radius: 999px; display: inline-block; }
         </style>
     </head>
     <body>
@@ -1721,14 +1741,155 @@ def chat(payload=Body(...)) -> dict:
                 from config import SHIYE_SEARCH_TOP_K
                 
                 clean_query = ' '.join(query_parts) if query_parts else query
-                request = SearchRequest(query=clean_query, filters=filters, top_k=SHIYE_SEARCH_TOP_K)
+                request = SearchRequest(query=clean_query, filters=filters, top_k=SHIYE_SEARCH_TOP_K, debug=debug)
                 hits = workspace.search(request)
                 
                 if not hits:
                     return {"messages": [make_system_msg(f"[find] No results found for: {clean_query}")]}
                 
+                # Prepare debug context and helpers
+                debug_info = workspace.get_last_search_debug_info() if debug else None
+                score_order = (debug_info.get("score_keys") if debug_info else None) or ["dense", "sparse", "exact", "fused", "rerank", "recency_boost", "type_boost", "exact_match_boost", "final"]
+
+                def fmt_score_value(val):
+                    try:
+                        return f"{float(val):.4f}"
+                    except Exception:
+                        return str(val)
+
+                def render_score_chips(scores: dict) -> str:
+                    if not scores:
+                        return ""
+                    chips = []
+                    seen = set()
+                    for stage in score_order:
+                        if stage in scores:
+                            chips.append(f"<span class='score-chip'><span class='score-label'>{stage}</span> {fmt_score_value(scores.get(stage))}</span>")
+                            seen.add(stage)
+                    for stage, value in (scores or {}).items():
+                        if stage in seen:
+                            continue
+                        chips.append(f"<span class='score-chip'><span class='score-label'>{stage}</span> {fmt_score_value(value)}</span>")
+                    if not chips:
+                        return ""
+                    return "<div class='hit-scores debug-only'><div class='score-chip-row'>" + "".join(chips) + "</div></div>"
+
+                def render_score_chart(candidates: list) -> str:
+                    """Render a simple multi-line dot plot for key score stages."""
+                    if not candidates:
+                        return "<div class='debug-item'>No candidates to chart.</div>"
+                    top = sorted(candidates, key=lambda c: c.get("rank") or 0)[:20]
+                    stages = ["dense", "sparse", "fused", "rerank", "final"]
+                    colors = {
+                        "dense": "#5b8def",
+                        "sparse": "#fb923c",
+                        "fused": "#22c55e",
+                        "rerank": "#a855f7",
+                        "final": "#111827",
+                    }
+                    max_score = 0.0
+                    for cand in top:
+                        sh = cand.get("score_history") or {}
+                        for stage in stages:
+                            if stage in sh and isinstance(sh[stage], (int, float)):
+                                max_score = max(max_score, float(sh[stage]))
+                        if isinstance(cand.get("final_score"), (int, float)):
+                            max_score = max(max_score, float(cand["final_score"]))
+                    if max_score <= 0:
+                        max_score = 1.0
+                    n = len(top)
+                    step = max(24, int(320 / max(1, n - 1)))
+                    width = max(360, step * (n - 1) + 40)
+                    height = 140
+                    points = {stage: [] for stage in stages}
+                    rects = []
+                    labels = []
+                    for idx, cand in enumerate(top):
+                        x = 20 + idx * step
+                        sh = cand.get("score_history") or {}
+                        final_val = cand.get("final_score") if cand.get("final_score") is not None else sh.get("final")
+                        if isinstance(final_val, (int, float)):
+                            fy = height - (float(final_val) / max_score) * (height - 20)
+                            rects.append(f"<rect x='{x-4}' y='{fy}' width='8' height='{height-fy}' fill='{colors['final']}' opacity='0.4' rx='2' />")
+                        for stage in stages:
+                            if stage == "final":
+                                val = final_val
+                            else:
+                                val = sh.get(stage)
+                            if not isinstance(val, (int, float)):
+                                continue
+                            y = height - (float(val) / max_score) * (height - 20)
+                            points[stage].append((x, y))
+                        labels.append(f"<text x='{x}' y='{height + 12}' text-anchor='middle' font-size='10' fill='#6b7280'>#{cand.get('rank')}</text>")
+                    polylines = []
+                    dots = []
+                    for stage in stages:
+                        if not points[stage]:
+                            continue
+                        pts = " ".join(f"{x},{y:.2f}" for x, y in points[stage])
+                        polylines.append(f"<polyline fill='none' stroke='{colors[stage]}' stroke-width='{3 if stage=='final' else 2}' points='{pts}' />")
+                        dots.extend(
+                            f"<circle cx='{x}' cy='{y:.2f}' r='3' fill='{colors[stage]}' />"
+                            for x, y in points[stage]
+                        )
+                    legend_items = "".join(
+                        f"<span class='swatch'><span class='dot' style='background:{colors[s]}'></span>{s}</span>"
+                        for s in stages if points[s]
+                    )
+                    legend = f"<div class='legend'>{legend_items}</div>"
+                    svg_parts = [
+                        f"<svg viewBox='0 0 {width} {height+20}' role='img' aria-label='Score drop-off'>",
+                        *rects,
+                        *polylines,
+                        *dots,
+                        *labels,
+                        "</svg>",
+                    ]
+                    return "<div class='score-chart'>" + "".join(svg_parts) + legend + "</div>"
+
+                def render_debug_panel(info: dict) -> str:
+                    queries = info.get("queries", {})
+                    stages = info.get("stages", {})
+                    filters_applied = info.get("filters", {})
+                    dense_stage = stages.get("dense", {})
+                    sparse_stage = stages.get("sparse", {})
+                    exact_stage = stages.get("exact", {})
+                    fusion_stage = stages.get("fusion", {})
+                    rerank_stage = stages.get("rerank", {})
+                    final_stage = stages.get("final", {})
+                    post_list = stages.get("post_processors") or info.get("post_processors") or []
+                    parts = [
+                        "<div class='search-debug'>",
+                        "<div class='debug-header' onclick='this.nextElementSibling.classList.toggle(\"debug-collapsed\")'>🔍 Retrieval Debug (click to toggle)</div>",
+                        "<div class='debug-content'>",
+                        "<div class='debug-section'>",
+                        "<div class='debug-section-title'>Queries</div>",
+                        f"<div class='debug-item'>Raw: <strong>{info.get('query', '')}</strong></div>",
+                        f"<div class='debug-item'>Dense (semantic): <strong>{(queries.get('dense') or {}).get('query', info.get('dense_query') or info.get('query', ''))}</strong> • Filters: {(queries.get('dense') or {}).get('filters', filters_applied)}</div>",
+                        f"<div class='debug-item'>Sparse (BM25): <strong>{(queries.get('sparse') or {}).get('query', info.get('sparse_query') or info.get('query', ''))}</strong> • Filters: {(queries.get('sparse') or {}).get('filters', filters_applied)}</div>",
+                        f"<div class='debug-item'>Exact match: <strong>{(queries.get('exact') or {}).get('query', info.get('exact_query', info.get('query', '')))}</strong> • Filters: {(queries.get('exact') or {}).get('filters', filters_applied)}</div>",
+                        "</div>",
+                        "<div class='debug-section'>",
+                        "<div class='debug-section-title'>Retrieval Pipeline</div>",
+                        f"<div class='debug-item'>Dense (FAISS): {dense_stage.get('retrieved', info.get('dense_results_count', 0))} results → {dense_stage.get('after_filters', info.get('dense_filtered_count', 0))} after filters</div>",
+                        f"<div class='debug-item'>Sparse (BM25): {sparse_stage.get('retrieved', info.get('sparse_results_count', 0))} results</div>",
+                        f"<div class='debug-item'>Exact match: {exact_stage.get('retrieved', info.get('exact_results_count', 0))} results</div>",
+                        f"<div class='debug-item'>RRF Fusion: {fusion_stage.get('unique', info.get('fused_count', 0))} unique candidates</div>",
+                        f"<div class='debug-item'>Reranked: {'Yes' if rerank_stage.get('applied', info.get('reranked')) else 'No'} (top {rerank_stage.get('top_k', info.get('rerank_count', 0)) or 'N/A'})</div>",
+                        f"<div class='debug-item'>Post-processors: {', '.join(post_list) if post_list else 'none'}</div>",
+                        f"<div class='debug-item'>Final: {final_stage.get('returned', info.get('final_count', 0))} results</div>",
+                        "</div>",
+                    ]
+                    candidates = info.get('candidates') or info.get('top_candidates') or []
+                    if candidates:
+                        parts.append("<div class='debug-section'><div class='debug-section-title'>Score drop-off (final scores, top 20)</div>")
+                        parts.append(render_score_chart(candidates))
+                        parts.append("</div>")
+                    parts.append("</div></div>")
+                    return "".join(parts)
+
                 # Format results as HTML
-                results_html = f"<div class='search-results'><div class='search-header'>Found {len(hits)} results for: <strong>{clean_query}</strong></div>"
+                results_parts = [f"<div class='search-results'><div class='search-header'>Found {len(hits)} results for: <strong>{clean_query}</strong></div>"]
                 
                 for hit in hits:
                     # Format timestamp
@@ -1743,23 +1904,33 @@ def chat(payload=Body(...)) -> dict:
                     # Format score
                     score = hit.scores.get('final', 0)
                     
-                    results_html += f"""
-                    <div class='search-hit' data-chunk-id='{hit.chunk_id}'>
-                        <div class='hit-header'>
-                            <span class='hit-type'>{hit.doc_type}</span>
-                            <span class='hit-score'>Score: {score:.3f}</span>
-                            <span class='hit-date'>{timestamp_str}</span>
-                        </div>
-                        <div class='hit-title'>{hit.doc_title or 'Untitled'}</div>
-                        <div class='hit-text'>{preview_text}</div>
-                    """
+                    hit_parts = [
+                        f"<div class='search-hit' data-chunk-id='{hit.chunk_id}'>",
+                        "<div class='hit-header'>",
+                        f"<span class='hit-type'>{hit.doc_type}</span>",
+                        f"<span class='hit-score'>Score: {score:.3f}</span>",
+                        f"<span class='hit-date'>{timestamp_str}</span>",
+                        "</div>",
+                        f"<div class='hit-title'>{hit.doc_title or 'Untitled'}</div>",
+                        f"<div class='hit-text'>{preview_text}</div>",
+                    ]
                     
                     if hit.doc_source:
-                        results_html += f"<div class='hit-source'><a href='{hit.doc_source}' target='_blank'>{hit.doc_source}</a></div>"
+                        hit_parts.append(f"<div class='hit-source'><a href='{hit.doc_source}' target='_blank'>{hit.doc_source}</a></div>")
                     
-                    results_html += "</div>"
+                    if debug:
+                        hit_parts.append(render_score_chips(getattr(hit, "scores", {}) or {}))
+                    
+                    hit_parts.append("</div>")
+                    results_parts.append("".join(hit_parts))
                 
-                results_html += "</div>"
+                results_parts.append("</div>")
+                
+                # Add debug information if debug mode is enabled
+                if debug and debug_info:
+                    results_parts.append(render_debug_panel(debug_info))
+                
+                results_html = "".join(results_parts)
                 
                 return {"messages": [make_system_msg(results_html)]}
             except Exception as e:

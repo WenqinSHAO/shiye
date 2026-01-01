@@ -1,0 +1,308 @@
+## 1) Current System Reality and Target Outcomes
+
+### What Shiye Already Has (Current Implementation)
+
+* **Storage Architecture**: Local-first storage under `~/.shiye/`
+  - `shiye.db`: SQLite database with `documents` and `chunks` tables
+  - `shiye.faiss`: FAISS IndexIDMap2 (already ID-mapped for direct chunk_id returns)
+  - `models/`: Cached embedding models (default: sentence-transformers/all-MiniLM-L6-v2)
+  
+* **Data Model** (storage.py):
+  - **documents** table: `id`, `source`, `uri`, `doc_type`, `created_at`, `event_at`, `ingested_at`, `title`, `tags`, `hash`, `status`
+  - **chunks** table: `id`, `document_id`, `seq`, `text`, `role`, `token_count`, `embedding_id`, `created_at`, `event_at`, `tags`, `focus_hint`, `deleted`
+  - Document types: `chat`, `note`, `web_page`, `paper`, `rss_daily_summary`
+  - **Chunk IDs are stable**: chunk.id is used as embedding_id in FAISS
+  
+* **Module Responsibilities** (well-separated architecture):
+  - `workspace.py`: High-level memory operations interface (add, recall, context_block)
+  - `storage.py`: LocalStore class - SQLite + FAISS persistence with chunk management
+  - `vector_store.py`: FaissIndex class - IndexIDMap2 wrapper with add/search/rebuild
+  - `embeddings.py`: EmbeddingProvider - sentence-transformers with L2 normalization
+  - `orchestrator.py`: DSPy-based LLM coordination
+  - `web.py`: FastAPI interface with chat, note, RSS commands
+
+* **Current Retrieval Capabilities**:
+  - `LocalStore.recall(query)`: Basic semantic search via FAISS (top_k=5)
+  - `LocalStore.context_block(n)`: Fetch recent chunks for context
+  - Soft deletion support (`deleted` flag in chunks table)
+  - Already using FAISS IndexIDMap2 (returns chunk_ids directly, not row indices)
+
+### What Enhanced Retrieval Should Deliver
+
+1. **Hybrid retrieval** (dense FAISS + sparse SQLite FTS5) with **filters** (time/type/tags) and **multi-cue scoring**
+2. **Reranking** with pluggable backends (cross-encoder, FlashRank, or BGE reranker)
+3. **Traceable outputs** with chunk_id, doc_id, timestamps, source references, and score explanations
+4. **Composable post-processing**: deduplication, grouping by document, recency boosts, exact-match boosting
+5. **Context assembly** that is deterministic, citeable, and token-budget aware for DSPy orchestrator
+
+### Gap Analysis: What's Missing
+
+❌ **Sparse retrieval**: No SQLite FTS5 table for BM25-style keyword search  
+❌ **Hybrid fusion**: No mechanism to combine dense + sparse results (e.g., RRF)  
+❌ **Reranking**: No cross-encoder or reranker integration  
+❌ **Multi-cue scoring**: No recency boosts, tag preferences, or exact-match detection  
+❌ **Search API**: No dedicated search interface (only implicit `recall()` used internally)  
+❌ **Metadata filtering**: FAISS over-retrieves then filters in SQLite (acceptable for now)  
+❌ **Context packing**: Basic `context_block()` exists but no citation-aware assembly  
+✅ **Stable chunk IDs**: Already implemented (chunk.id maps to embedding_id)  
+✅ **Soft deletion**: Already supported via `deleted` flag  
+✅ **ID-mapped FAISS**: Already using IndexIDMap2 for stable chunk_id returns
+
+---
+
+## 2) Data model: make “retrieval units” explicit and stable
+
+Even if you already store “documents,” semantic search behaves best when you introduce a **chunk** (or passage) layer with stable identifiers.
+
+### Recommended entities
+
+* **Document**: one logical item (`note`, `web_page`, etc.) with metadata (type, tags, timestamps, source URL).
+* **Chunk**: a slice of document text (plus optional “window” fields). This is your atomic retrieval unit.
+* **Embedding row**: maps `chunk_id -> vector_id` (FAISS) and stores embedding model version + dims.
+
+### Minimum metadata per chunk (strongly recommended)
+
+* `chunk_id` (UUID or integer PK)
+* `doc_id`
+* `chunk_index` (0..n-1 within doc)
+* `text`
+* `char_start`, `char_end` (or token offsets)
+* `created_at`, `event_at`, `ingested_at` inherited or overridden (your system already distinguishes these) ([GitHub][1])
+* `type`, `tags` (or tag join table)
+* `source_ref`: e.g., URL, chat message id, note section id
+
+**Why this matters:** without stable chunk IDs, you can’t (a) rerank reliably, (b) deduplicate, (c) cache, (d) produce credible citations.
+
+--
+
+## 3) Indexing strategy: treat ingestion as a pipeline
+
+### Chunking
+
+Implement chunkers per doc type:
+
+* `chat`: message-level chunks + optional conversation-window chunks (e.g., ±2 turns) for context coherence.
+* `note/web_page`: structure-aware chunking (Markdown headings; HTML main content) plus fallback fixed-size chunking.
+* Always store **chunk boundaries** (offsets) so you can reconstruct “original chunk” precisely.
+
+### Embeddings (FAISS hygiene)
+
+* Decide similarity convention: **cosine** typically implies L2-normalized vectors; enforce normalization at embed time.
+* Store `embedding_model` (e.g. `SHIYE_EMBED_MODEL`) with each chunk so future re-embedding is manageable. ([GitHub][1])
+* Keep the FAISS mapping explicit:
+
+  * Prefer an ID-mapped index pattern (`faiss.IndexIDMap2` or equivalent) so FAISS returns your `chunk_id` directly (instead of “row number drift” when you delete/merge).
+* Follow FAISS guidance when you graduate beyond flat search (HNSW/IVF/PQ tradeoffs). ([GitHub][2])
+
+### Incremental updates + deletion
+
+You will eventually need:
+
+* Soft delete at SQLite layer, and either:
+
+  * Periodic FAISS rebuild, or
+  * A tombstone filter at query time (FAISS returns chunk IDs; SQLite filters out deleted ones).
+    Rebuild cadence can be “when FAISS tombstones exceed X%”.
+
+---
+
+## 4) Query pipeline: modular, inspectable, and extensible
+
+Think in stages; each stage produces artifacts you can log for debugging.
+
+### Stage A — Query parsing and intent extraction
+
+Input: `SearchRequest(query, filters, options)`
+
+* Detect structured operators (examples you can implement later):
+
+  * `type:note`, `tag:projectX`, `before:2025-10-01`, `after:...`
+  * `time:event` vs `time:created` (because you have both) ([GitHub][1])
+* Normalize query text and extract:
+
+  * keywords for sparse search
+  * optional regex tokens for “grep-like” boosting
+
+### Stage B — Candidate generation (multi-retriever)
+
+Run retrievers in parallel and return candidates as `(chunk_id, score, channel)`:
+
+1. **Dense retriever**: FAISS topK (semantic similarity).
+2. **Sparse retriever**: SQLite FTS5 BM25 over chunk text (and possibly doc title/url). FTS5 is a standard way to do this inside SQLite. ([chiark.greenend.org.uk][3])
+3. **Exact/grep retriever (optional)**: regex or substring match over a *filtered* subset (e.g., within last N days or within candidates from (1)+(2)).
+
+**Filtering note:** FAISS doesn’t naturally pre-filter by timestamp/tags. A practical pattern is **over-retrieve** (e.g., top 500–2000), then apply metadata filters in SQLite, then continue. If you later want true prefiltering, keep the architecture open to:
+
+* Partitioned FAISS (e.g., per doc type or by month),
+* Or switching to an embedded vector-in-SQLite approach like `sqlite-vec` (future option). ([Mozilla Builders][4])
+
+### Stage C — Fusion (hybrid combination)
+
+Make fusion a pluggable strategy. Recommended default: **Reciprocal Rank Fusion (RRF)** because it is robust to score-scale mismatch and widely used for hybrid search. ([Simon Willison’s Weblog][5])
+
+* Also consider weighted blending after normalization, but RRF is usually the safest first default.
+
+Practical references for hybrid + RRF with SQLite:
+
+* Simon Willison’s writeup on hybrid full-text + vector search and RRF. ([Simon Willison’s Weblog][5])
+* A concrete example repo using SQLite hybrid search patterns. ([GitHub][6])
+
+### Stage D — Reranking (semantic precision)
+
+Treat reranking as optional but strongly recommended for quality.
+
+**Good open-source reranker families (2024–2026 reality):**
+
+* **BGE rerankers** (multilingual options exist, and “v2” variants are commonly used). ([bge-model.com][7])
+* **FlashRank** for lightweight CPU-friendly reranking and easy integration. ([GitHub][8])
+* **ColBERT/RAGatouille** if you want late-interaction style scoring that can outperform single-vector embeddings on some corpora (more infra, but powerful). ([PyPI][9])
+
+**Design recommendation:** implement a `Reranker` interface and start with one default:
+
+* If you care about “runs everywhere”: FlashRank. ([PyPI][10])
+* If you care about multilingual and stronger cross-encoder scoring: BGE reranker. ([bge-model.com][7])
+
+### Stage E — Post-processing: multi-cue scoring & result shaping
+
+This is where your “tweaks” live, as clean modules:
+
+* **Time boosts**: recency bias using `created_at` or `event_at` (configurable). ([GitHub][1])
+* **Type/tag boosts**: e.g., prefer `note` over `rss_daily_summary` unless query implies news.
+* **Exact-match boosts**: phrase hit in chunk text / title.
+* **Dedupe**:
+
+  * by `doc_id` (keep best chunk + optionally attach sibling chunks as context)
+  * near-duplicate chunk text (hash-based)
+* **Diversification**: ensure results aren’t all from the same day or same doc unless clearly best.
+
+All of these should be implemented as composable `ScoringModifier` / `PostProcessor` steps.
+
+---
+
+## 5) Summarization and “reference to original chunk” (non-negotiable)
+
+For personal memory systems, retrieval without faithful citation quickly becomes unusable.
+
+### Retrieval output contract
+
+Return a `SearchHit` that always includes:
+
+* `chunk_id`, `doc_id`, `doc_type`
+* timestamps (`created_at`, `event_at`, `ingested_at`) ([GitHub][1])
+* `text` (chunk text)
+* `source_ref` (URL / conversation id / note path)
+* `offsets` (char/token range)
+* `scores` as a dict: `{dense:..., bm25:..., rrf:..., rerank:..., final:...}`
+* `explanations` (optional): top contributing signals
+
+### Summarization design
+
+Implement a deterministic “context packer” that:
+
+* selects top hits under a token budget
+* groups by doc and includes minimal surrounding text (windowing)
+* emits a structured payload for the LLM:
+
+  * `[{citation_id, chunk_id, doc_id, type, time, text}]`
+
+This aligns with your orchestrator’s job (DSPy-based coordination) and keeps the “memory” layer factual. ([GitHub][1])
+
+---
+
+## 6) Extensibility: concrete module/interface design for Shiye
+
+Your repo is currently flat (single-file modules). You can still add a small internal package without disruption.
+
+### Suggested new module: `retrieval/` (or `search/`)
+
+Core protocols (Python typing/ABCs):
+
+* `Retriever`: `retrieve(request) -> list[Candidate]`
+* `FusionStrategy`: `fuse(list[list[Candidate]]) -> list[Candidate]`
+* `Reranker`: `rerank(query, candidates) -> list[Candidate]`
+* `PostProcessor`: `process(request, candidates) -> list[SearchHit]`
+* `ContextPacker`: `pack(hits, budget) -> ContextBundle`
+
+### Where to integrate in Shiye
+
+* `workspace.py`: expose the single entry point: `workspace.search(request)`. The README positions `workspace.py` as “High-level memory operations interface”. ([GitHub][1])
+* `storage.py`: provide methods like:
+
+  * `get_chunk(chunk_id)`, `get_doc(doc_id)`
+  * `fts_search(query, filters, k)`
+  * metadata filtering utilities
+* `vector_store.py`: provide:
+
+  * `search(embedding, k)` returning chunk IDs + distances
+  * bulk add/update hooks
+* `embeddings.py`: embed + normalize + cache
+
+This preserves the architecture described in your README and keeps the orchestrator insulated from retrieval plumbing. ([GitHub][1])
+
+---
+
+## 7) “Latest” techniques worth implementing as optional plugins
+
+These are not required for v1, but design for them now:
+
+### Multi-query / query expansion
+
+* **RAG-Fusion** (generate multiple queries, retrieve per query, fuse with RRF). ([arXiv][11])
+  Use it as a plugin step: `QueryExpander.expand(query) -> [q1..qn]`.
+
+### Embedded hybrid search in SQLite (future backend swap)
+
+* `sqlite-vec` enables vector search inside SQLite, useful if you ever want a single-file backend (and better pre-filtering). ([Mozilla Builders][4])
+  Even if you stay with FAISS, design your `VectorIndex` interface so it can be swapped.
+
+---
+
+## 8) Testing, evaluation, and observability (so you can tune reranking sanely)
+
+### Golden-set driven evaluation
+
+Create a small `eval/` harness:
+
+* store 50–200 “real queries” + expected hits (or expected doc IDs) + time constraints
+* compute retrieval metrics (Recall@K, MRR, nDCG)
+* log per-stage artifacts:
+
+  * dense topK
+  * bm25 topK
+  * fused list
+  * reranked list
+    This is the only practical way to tune weights and recency boosts without guesswork.
+
+### Runtime traces
+
+Because your UI already supports debug traces (per README), expose a “retrieval trace” blob to the front-end toggle:
+
+* query parse results
+* which filters were applied (`event_at` vs `created_at`)
+* top signals per hit ([GitHub][1])
+
+---
+
+## 9) Implementation checklist for your coding agent (pragmatic order)
+
+1. **Define chunk schema + stable IDs** (even if you need a one-time migration).
+2. Implement `SearchRequest/SearchHit` dataclasses.
+3. Add **FTS5** table + BM25 retrieval in SQLite (or confirm existing; FTS5 is the standard extension). ([chiark.greenend.org.uk][3])
+4. Implement FAISS retriever returning `chunk_id`s (ID-mapped).
+5. Implement **RRF fusion** as default. ([Simon Willison’s Weblog][5])
+6. Add one reranker (FlashRank or BGE) behind a `Reranker` interface. ([PyPI][10])
+7. Add post-processors: filtering, time boost, dedupe-by-doc, exact-match boost.
+8. Add context packer that emits citeable context payload for the orchestrator.
+9. Add tests: determinism, filters correctness, “reference integrity” (chunk offsets match original), regression for top queries.
+
+[1]: https://github.com/WenqinSHAO/shiye/tree/master "GitHub - WenqinSHAO/shiye: toy project around LLM"
+[2]: https://github.com/facebookresearch/faiss/wiki/Guidelines-to-choose-an-index?utm_source=chatgpt.com "Guidelines to choose an index · facebookresearch/faiss Wiki · GitHub"
+[3]: https://www.chiark.greenend.org.uk/doc/sqlite3/fts5.html?utm_source=chatgpt.com "SQLite FTS5 Extension - chiark"
+[4]: https://builders.mozilla.org/project/sqlite-vec/?utm_source=chatgpt.com "SQlite-vec - Mozilla Builders"
+[5]: https://simonwillison.net/2024/Oct/4/hybrid-full-text-search-and-vector-search-with-sqlite/?utm_source=chatgpt.com "Hybrid full-text search and vector search with SQLite"
+[6]: https://github.com/liamca/sqlite-hybrid-search?utm_source=chatgpt.com "GitHub - liamca/sqlite-hybrid-search: Hybrid Search (BM25 & Vector ..."
+[7]: https://bge-model.com/tutorial/5_Reranking/5.2.html?utm_source=chatgpt.com "BGE Reranker — BGE documentation"
+[8]: https://github.com/PrithivirajDamodaran/FlashRank?utm_source=chatgpt.com "GitHub - PrithivirajDamodaran/FlashRank: Lite & Super-fast re-ranking ..."
+[9]: https://pypi.org/project/RAGatouille/?utm_source=chatgpt.com "RAGatouille · PyPI"
+[10]: https://pypi.org/project/FlashRank/?utm_source=chatgpt.com "FlashRank · PyPI"
+[11]: https://arxiv.org/abs/2402.03367?utm_source=chatgpt.com "RAG-Fusion: a New Take on Retrieval-Augmented Generation"

@@ -239,4 +239,10 @@ class MemoryWorkspace:
                 continue
         
         return hits
+    
+    def get_last_search_debug_info(self) -> Optional[dict]:
+        """Get debug info from last search operation."""
+        if self.store and hasattr(self.store, '_last_debug_info'):
+            return self.store._last_debug_info
+        return None
   
