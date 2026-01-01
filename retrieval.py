@@ -94,7 +94,8 @@ class FlashRankReranker:
             return candidates
         
         # Fetch full text for top N candidates (reranking is expensive)
-        top_n = min(50, len(candidates))
+        from config import SHIYE_RERANK_TOP_K
+        top_n = min(SHIYE_RERANK_TOP_K, len(candidates))
         passages = []
         for c in candidates[:top_n]:
             try:

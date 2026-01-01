@@ -879,7 +879,7 @@ class LocalStore:
         with self._connect() as conn:
             placeholders = ','.join('?' * len(chunk_ids))
             sql = f"""
-            SELECT c.id, c.document_id, c.text, c.created_at, c.event_at, d.doc_type
+            SELECT c.id, c.document_id, c.text, c.created_at, c.event_at, d.doc_type, c.tags as chunk_tags, d.tags as doc_tags
             FROM chunks c
             JOIN documents d ON c.document_id = d.id
             WHERE c.id IN ({placeholders})
@@ -903,10 +903,12 @@ class LocalStore:
                 sql += f" AND c.{time_field} > ?"
                 params.append(request.filters['after'])
             
-            # Apply tags filter if present
+            # Apply tags filter - check both chunk and document tags
             if request.filters.get('tags'):
-                sql += " AND c.tags LIKE ?"
-                params.append(f'%"{request.filters["tags"]}"%')
+                sql += " AND (c.tags LIKE ? OR d.tags LIKE ?)"
+                tag_pattern = f'%"{request.filters["tags"]}"%'
+                params.append(tag_pattern)
+                params.append(tag_pattern)
             
             rows = conn.execute(sql, params).fetchall()
         
@@ -935,7 +937,7 @@ class LocalStore:
     def _sparse_retrieval(self, request: SearchRequest) -> List[Candidate]:
         """SQLite FTS5 BM25 search."""
         with self._connect() as conn:
-            # FTS5 full-text search
+            # FTS5 full-text search with joins for filtering
             sql = """
             SELECT 
                 f.chunk_id,
@@ -944,19 +946,39 @@ class LocalStore:
                 c.document_id,
                 c.created_at,
                 c.event_at,
-                f.doc_type
+                f.doc_type,
+                c.tags as chunk_tags,
+                d.tags as doc_tags
             FROM chunks_fts f
             JOIN chunks c ON f.chunk_id = c.id
+            JOIN documents d ON c.document_id = d.id
             WHERE chunks_fts MATCH ?
               AND c.deleted = 0
             """
             
             params = [request.query]
             
-            # Apply filters
+            # Apply filters (same as dense retrieval for consistency)
             if request.filters.get('doc_type'):
                 sql += " AND f.doc_type = ?"
                 params.append(request.filters['doc_type'])
+            
+            if request.filters.get('before'):
+                time_field = request.filters.get('time_field', 'created_at')
+                sql += f" AND c.{time_field} < ?"
+                params.append(request.filters['before'])
+            
+            if request.filters.get('after'):
+                time_field = request.filters.get('time_field', 'created_at')
+                sql += f" AND c.{time_field} > ?"
+                params.append(request.filters['after'])
+            
+            # Apply tags filter - check both chunk and document tags
+            if request.filters.get('tags'):
+                sql += " AND (c.tags LIKE ? OR d.tags LIKE ?)"
+                tag_pattern = f'%"{request.filters["tags"]}"%'
+                params.append(tag_pattern)
+                params.append(tag_pattern)
             
             sql += " ORDER BY bm25(f) LIMIT ?"
             params.append(request.top_k * 2)

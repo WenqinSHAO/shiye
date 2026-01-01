@@ -1718,8 +1718,10 @@ def chat(payload=Body(...)) -> dict:
                     else:
                         query_parts.append(part)
                 
+                from config import SHIYE_SEARCH_TOP_K
+                
                 clean_query = ' '.join(query_parts) if query_parts else query
-                request = SearchRequest(query=clean_query, filters=filters, top_k=20)
+                request = SearchRequest(query=clean_query, filters=filters, top_k=SHIYE_SEARCH_TOP_K)
                 hits = workspace.search(request)
                 
                 if not hits:
