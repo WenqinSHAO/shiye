@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from datatypes import Message, ensure_utc
 from handlers import handle_add
 from orchestrator import Orchestrator
+from storage import NoteConflictError
 from workspace import MemoryWorkspace
 import rss
 
@@ -179,6 +180,24 @@ def index() -> HTMLResponse:
             .history-day-count { font-size: 12px; color: var(--subtle); }
             .history-day-body { padding: 8px 10px; display: none; background: #f9fbff; border-top: 1px solid var(--border); }
             .history-subtle { font-size: 12px; color: var(--subtle); }
+            #toast-container { position: fixed; bottom: 18px; right: 18px; left: auto; top: auto; display: flex; flex-direction: column-reverse; gap: 10px; z-index: 120; pointer-events: none; align-items: flex-end; max-width: 420px; }
+            .toast { min-width: 240px; max-width: 360px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border); background: #fff; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.18); opacity: 0; transform: translateY(12px); transition: transform 0.2s ease, opacity 0.2s ease; display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--ink); pointer-events: auto; }
+            .toast.show { opacity: 1; transform: translateY(0); }
+            .toast-info { background: #e9f1ff; border-color: #cddffb; }
+            .toast-success { background: #ecfdf3; border-color: #bbf7d0; color: #166534; }
+            .toast-error { background: #fff1f2; border-color: #fecdd3; color: #991b1b; }
+            .toast button.toast-action { margin-left: auto; border: 1px solid var(--border); background: var(--panel); border-radius: 8px; padding: 6px 8px; cursor: pointer; font-size: 12px; }
+            .note-banner { display: none; margin-top: 6px; padding: 8px 10px; border-radius: 10px; border: 1px dashed var(--border); background: #f5f7fb; font-size: 12px; color: var(--ink); align-items: center; gap: 8px; }
+            .note-banner.show { display: inline-flex; }
+            .note-banner button { font-size: 12px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); cursor: pointer; }
+            .note-pill.inline { padding: 4px 10px; font-size: 12px; }
+            #status-banner { display: none; margin: 10px 16px 0; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--border); background: var(--panel); color: var(--ink); box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08); align-items: center; gap: 8px; font-size: 13px; }
+            #status-banner.show { display: flex; }
+            #status-banner.status-info { border-color: #cddffb; background: #e9f1ff; }
+            #status-banner.status-error { border-color: #fecdd3; background: #fff1f2; color: #7f1d1d; }
+            #status-banner.status-success { border-color: #bbf7d0; background: #ecfdf3; color: #166534; }
+            #status-text { flex: 1; }
+            #status-close { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); cursor: pointer; padding: 4px 8px; font-size: 12px; color: var(--subtle); }
         </style>
     </head>
     <body>
@@ -193,6 +212,10 @@ def index() -> HTMLResponse:
                 <button id="historyBtn" type="button" class="ghost" onclick="toggleHistory()">History</button>
             </div>
         </header>
+        <div id="status-banner" role="status" aria-live="polite">
+            <span id="status-text"></span>
+            <button id="status-close" type="button" aria-label="Dismiss status">✕</button>
+        </div>
         <main>
             <section class="chat">
                 <div id="log"></div>
@@ -222,7 +245,7 @@ def index() -> HTMLResponse:
                             <div id="noteStatus" class="note-subtle">Capture Markdown notes with previews.</div>
                         </div>
                         <div class="note-actions">
-                            <button type="button" class="ghost" onclick="refreshNotes()">Refresh</button>
+                            <button type="button" class="ghost" onclick="refreshNotes(true, true)">Refresh</button>
                             <button type="button" class="secondary" onclick="newNote()">New</button>
                         </div>
                     </div>
@@ -233,8 +256,10 @@ def index() -> HTMLResponse:
                         <div>
                             <div class="note-pill">Editor</div>
                             <div id="note-updated" class="note-subtle"></div>
+                            <div id="note-recovery" class="note-banner"></div>
                         </div>
                         <div class="note-actions">
+                            <span id="note-saving" class="note-pill subtle" style="display:none;">Saving…</span>
                             <span id="note-dirty" class="note-pill subtle" style="display:none;">Unsaved</span>
                             <button type="button" class="ghost" onclick="insertTimestamp()">Insert date/time</button>
                             <button id="saveNoteBtn" type="button" class="ghost" onclick="saveActiveNote()">Save</button>
@@ -263,6 +288,7 @@ def index() -> HTMLResponse:
                 </div>
             </aside>
         </main>
+        <div id="toast-container" aria-live="polite"></div>
         <script>
             const logEl = document.getElementById('log');
             const inputEl = document.getElementById('input');
@@ -274,15 +300,22 @@ def index() -> HTMLResponse:
             const historyWrapper = document.getElementById('history-wrapper');
             const historyPanel = document.getElementById('history-panel');
             const historyResize = document.getElementById('history-resize');
+            const toastContainer = document.getElementById('toast-container');
             const noteShell = document.getElementById('note-shell');
             const noteList = document.getElementById('note-list');
             const noteInput = document.getElementById('note-input');
             const notePreview = document.getElementById('note-preview');
+            const saveNoteBtn = document.getElementById('saveNoteBtn');
             const noteTitleDisplay = document.getElementById('note-title-display');
             const noteUpdated = document.getElementById('note-updated');
+            const noteSaving = document.getElementById('note-saving');
             const noteDirty = document.getElementById('note-dirty');
             const noteStatus = document.getElementById('noteStatus');
+            const noteRecovery = document.getElementById('note-recovery');
             const mathScript = document.getElementById('mathjax-script');
+            const statusBanner = document.getElementById('status-banner');
+            const statusText = document.getElementById('status-text');
+            const statusClose = document.getElementById('status-close');
             function normalizeLinkValue(val) {
                 if (typeof val === "string") return val;
                 if (!val) return "";
@@ -295,6 +328,101 @@ def index() -> HTMLResponse:
                     if (typeof val.raw === "string") return val.raw;
                 }
                 return String(val);
+            }
+
+            function showToast(message, type = "info", options = {}) {
+                if (!toastContainer) return;
+                const toast = document.createElement("div");
+                toast.className = `toast toast-${type}`;
+                toast.textContent = message || "";
+                if (options.actionText && typeof options.onAction === "function") {
+                    const action = document.createElement("button");
+                    action.className = "toast-action";
+                    action.textContent = options.actionText;
+                    action.onclick = () => {
+                        try { options.onAction(); } catch (e) { console.warn("toast action failed", e); }
+                        toast.remove();
+                    };
+                    toast.appendChild(action);
+                }
+                toastContainer.appendChild(toast);
+                requestAnimationFrame(() => toast.classList.add("show"));
+                const ttl = options.duration ?? 4300;
+                setTimeout(() => {
+                    toast.classList.remove("show");
+                    setTimeout(() => toast.remove(), 240);
+                }, ttl);
+            }
+
+            let statusHideTimer = null;
+            function clearStatus() {
+                if (statusHideTimer) {
+                    clearTimeout(statusHideTimer);
+                    statusHideTimer = null;
+                }
+                if (statusBanner) statusBanner.classList.remove("show", "status-info", "status-error", "status-success");
+                if (statusText) statusText.textContent = "";
+            }
+
+            function setStatus(message, type = "info", options = {}) {
+                if (!statusBanner || !statusText) return;
+                if (statusHideTimer) {
+                    clearTimeout(statusHideTimer);
+                    statusHideTimer = null;
+                }
+                statusBanner.className = `status-banner show status-${type}`;
+                statusText.textContent = message || "";
+                const ttl = options.ttl === undefined ? (type === "error" ? null : 4200) : options.ttl;
+                if (ttl) {
+                    statusHideTimer = setTimeout(() => clearStatus(), ttl);
+                }
+            }
+
+            function surfaceError(message, options = {}) {
+                const msg = message || "Something went wrong — please retry.";
+                setStatus(msg, "error", { ttl: options.ttl ?? 9000 });
+                if (options.toast !== false) {
+                    showToast(msg, "error", {
+                        duration: options.duration ?? 5200,
+                        actionText: options.actionText,
+                        onAction: options.onAction,
+                    });
+                }
+            }
+
+            if (statusClose) {
+                statusClose.addEventListener("click", clearStatus);
+            }
+
+            async function fetchJson(url, options = {}) {
+                const res = await fetch(url, options);
+                let raw = "";
+                let data = null;
+                try {
+                    raw = await res.text();
+                    data = raw ? JSON.parse(raw) : null;
+                } catch (e) {
+                    data = null;
+                }
+                if (!res.ok) {
+                    const detail = data && data.detail;
+                    let reason = "";
+                    if (typeof detail === "string") {
+                        reason = detail;
+                    } else if (detail && typeof detail === "object") {
+                        reason = detail.reason || detail.message || detail.error || "";
+                    }
+                    if (!reason && raw) {
+                        reason = raw.slice(0, 300);
+                    }
+                    const msg = reason || `Request failed (${res.status})`;
+                    const err = new Error(msg);
+                    err.status = res.status;
+                    err.payload = data;
+                    err.raw = raw;
+                    throw err;
+                }
+                return data || {};
             }
 
             const renderer = new marked.Renderer();
@@ -319,6 +447,11 @@ def index() -> HTMLResponse:
             let historyLoadedDays = {};
             let expandedMonths = new Set();
             let openHistoryDays = new Set();
+            let activeNoteVersion = null;
+            let noteAutosaveTimer = null;
+            let noteSavingNow = false;
+            let lastSavedContent = "";
+            const NOTE_DRAFT_PREFIX = "shiye.note.draft";
 
             function deriveNoteTitle(text) {
                 if (!text) return "Untitled note";
@@ -360,6 +493,91 @@ def index() -> HTMLResponse:
                 if (noteDirty) noteDirty.style.display = on ? "inline-flex" : "none";
             }
 
+            function setNoteSaving(on, label = "Saving…") {
+                noteSavingNow = on;
+                if (noteSaving) {
+                    noteSaving.style.display = on ? "inline-flex" : "none";
+                    noteSaving.textContent = label;
+                }
+                if (saveNoteBtn) {
+                    saveNoteBtn.disabled = on;
+                }
+            }
+
+            function getDraftKey(noteId = activeNoteId) {
+                const keyId = noteId === undefined || noteId === null ? "new" : noteId;
+                return `${NOTE_DRAFT_PREFIX}:${keyId}`;
+            }
+
+            function persistDraft(content, noteId = activeNoteId) {
+                try {
+                    const payload = {
+                        id: noteId,
+                        content: content ?? (noteInput ? noteInput.value : ""),
+                        savedAt: new Date().toISOString(),
+                        updatedAt: activeNoteVersion,
+                    };
+                    localStorage.setItem(getDraftKey(noteId), JSON.stringify(payload));
+                } catch (e) {
+                    console.warn("draft persist failed", e);
+                }
+            }
+
+            function readDraft(noteId = activeNoteId) {
+                try {
+                    const raw = localStorage.getItem(getDraftKey(noteId));
+                    return raw ? JSON.parse(raw) : null;
+                } catch (e) {
+                    console.warn("draft read failed", e);
+                    return null;
+                }
+            }
+
+            function clearDraft(noteId = activeNoteId) {
+                try {
+                    localStorage.removeItem(getDraftKey(noteId));
+                } catch (e) {
+                    console.warn("draft clear failed", e);
+                }
+            }
+
+            function hideNoteRecovery() {
+                if (!noteRecovery) return;
+                noteRecovery.classList.remove("show");
+                noteRecovery.innerHTML = "";
+            }
+
+            function renderNoteRecovery(message, onRestore) {
+                if (!noteRecovery) return;
+                noteRecovery.innerHTML = "";
+                const span = document.createElement("span");
+                span.textContent = message;
+                noteRecovery.appendChild(span);
+                if (onRestore) {
+                    const btn = document.createElement("button");
+                    btn.textContent = "Restore";
+                    btn.onclick = () => {
+                        onRestore();
+                        hideNoteRecovery();
+                    };
+                    noteRecovery.appendChild(btn);
+                }
+                noteRecovery.classList.add("show");
+            }
+
+            function scheduleAutosave(reason = "typing") {
+                if (noteAutosaveTimer) clearTimeout(noteAutosaveTimer);
+                noteAutosaveTimer = setTimeout(() => autosaveNote(reason), 1600);
+            }
+
+            async function autosaveNote(reason = "typing") {
+                if (noteAutosaveTimer) {
+                    noteAutosaveTimer = null;
+                }
+                if (!noteChanged) return;
+                await saveActiveNote({ isAutosave: true, reason });
+            }
+
             function setSending(on) {
                 sending = on;
                 if (sendBtn) {
@@ -385,15 +603,80 @@ def index() -> HTMLResponse:
                 typesetMath(notePreview);
             }
 
-            async function refreshNotes(autoSelect = true) {
+            function updateNoteMeta(ts, prefix = "Last saved") {
+                if (noteUpdated) {
+                    const label = ts ? `${prefix} ${new Date(ts).toLocaleString()}` : "";
+                    noteUpdated.textContent = label;
+                }
+            }
+
+            function maybeOfferDraft(noteId, serverContent, serverUpdatedAt) {
+                const draft = readDraft(noteId);
+                if (draft && draft.content && draft.content !== (serverContent || "")) {
+                    const draftTime = draft.savedAt ? new Date(draft.savedAt) : null;
+                    const serverTime = serverUpdatedAt ? new Date(serverUpdatedAt) : null;
+                    const newer = draftTime && serverTime ? draftTime > serverTime : true;
+                    const label = newer ? "Recovered newer local draft" : "Local draft available";
+                    renderNoteRecovery(label, () => {
+                        if (noteInput) {
+                            noteInput.value = draft.content;
+                            renderNotePreview();
+                            markNoteDirty(true);
+                            scheduleAutosave("restore-draft");
+                        }
+                        hideNoteRecovery();
+                        showToast("Draft restored", "success");
+                    });
+                    showToast(label, "info", {
+                        actionText: "Restore",
+                        onAction: () => {
+                            if (noteInput) {
+                                noteInput.value = draft.content;
+                                renderNotePreview();
+                                markNoteDirty(true);
+                                scheduleAutosave("restore-draft");
+                            }
+                            hideNoteRecovery();
+                        },
+                        duration: 7000,
+                    });
+                    setStatus(label, "info", { ttl: 6400 });
+                    return;
+                }
+                hideNoteRecovery();
+            }
+
+            function hasLocalDraft(noteId, serverUpdatedAt) {
+                const draft = readDraft(noteId);
+                if (!draft || !draft.content) return false;
+                if (!serverUpdatedAt) return true;
                 try {
-                    const res = await fetch("/api/notes");
-                    const data = await res.json();
+                    const draftTime = draft.savedAt ? new Date(draft.savedAt) : null;
+                    const serverTime = serverUpdatedAt ? new Date(serverUpdatedAt) : null;
+                    if (!draftTime) return false;
+                    if (!serverTime) return true;
+                    return draftTime > serverTime;
+                } catch (e) {
+                    return true;
+                }
+            }
+
+            async function refreshNotes(autoSelect = true, notifySuccess = false) {
+                if (noteStatus) {
+                    noteStatus.textContent = "Loading notes…";
+                }
+                setStatus("Loading notes…", "info", { ttl: 4200 });
+                try {
+                    const data = await fetchJson("/api/notes");
                     noteCache = data.notes || [];
                     notesLoadedOnce = true;
                     renderNotesList(noteCache);
                     if (noteStatus) {
                         noteStatus.textContent = noteCache.length ? `${noteCache.length} stored note(s)` : "No notes yet — start with a new one.";
+                    }
+                    setStatus(`Notebook synced (${noteCache.length} note${noteCache.length === 1 ? "" : "s"})`, "success", { ttl: 3200 });
+                    if (notifySuccess) {
+                        showToast("Notes refreshed", "success", { duration: 1800 });
                     }
                     if (autoSelect) {
                         if (activeNoteId && noteCache.some(n => n.id === activeNoteId)) return;
@@ -405,6 +688,8 @@ def index() -> HTMLResponse:
                     }
                 } catch (e) {
                     console.warn("Failed to load notes", e);
+                    if (noteStatus) noteStatus.textContent = "Notes unavailable — please retry.";
+                    surfaceError(e.message || "Failed to load notes");
                 }
             }
 
@@ -432,6 +717,13 @@ def index() -> HTMLResponse:
                     meta.textContent = updated ? `Updated ${updated}` : "Draft";
                     item.appendChild(title);
                     item.appendChild(meta);
+                    if (hasLocalDraft(n.id, n.updated_at)) {
+                        const draftTag = document.createElement("div");
+                        draftTag.className = "note-pill inline";
+                        draftTag.textContent = "Local draft";
+                        draftTag.style.marginTop = "6px";
+                        item.appendChild(draftTag);
+                    }
                     item.onclick = () => selectNote(n.id);
                     noteList.appendChild(item);
                 });
@@ -439,81 +731,164 @@ def index() -> HTMLResponse:
 
             async function loadNote(noteId) {
                 if (!noteId) return;
+                setStatus("Loading note…", "info", { ttl: 2600 });
                 try {
-                    const res = await fetch(`/api/notes/${noteId}`);
-                    if (!res.ok) return;
-                    const data = await res.json();
+                    const data = await fetchJson(`/api/notes/${noteId}`);
                     const note = data.note;
                     activeNoteId = note.id;
+                    activeNoteVersion = note.updated_at || null;
+                    lastSavedContent = note.content || "";
                     if (noteInput) noteInput.value = note.content || "";
                     markNoteDirty(false);
                     renderNotePreview();
-                    if (noteUpdated) {
-                        const ts = note.updated_at ? new Date(note.updated_at).toLocaleString() : "";
-                        noteUpdated.textContent = ts ? `Last saved ${ts}` : "";
-                    }
+                    updateNoteMeta(note.updated_at, "Last saved");
                     renderNotesList(noteCache);
+                    maybeOfferDraft(note.id, note.content, note.updated_at);
+                    setStatus(`Loaded "${deriveNoteTitle(note.content)}"`, "success", { ttl: 2600 });
                 } catch (e) {
                     console.warn("Failed to load note", e);
+                    if (noteStatus) noteStatus.textContent = "Failed to load note.";
+                    surfaceError(e.message || "Failed to load note");
                 }
             }
 
-            async function saveActiveNote() {
+            async function saveActiveNote(options = {}) {
                 if (!noteInput) return null;
                 const content = noteInput.value || "";
+                const isAutosave = !!options.isAutosave;
+                const reason = options.reason || "manual";
+                if (isAutosave && !noteChanged) {
+                    return null;
+                }
+                if (noteAutosaveTimer) {
+                    clearTimeout(noteAutosaveTimer);
+                    noteAutosaveTimer = null;
+                }
                 if (!content.trim() && !activeNoteId) {
                     markNoteDirty(false);
+                    hideNoteRecovery();
+                    clearDraft(null);
                     return null;
                 }
                 const payload = { content, title: deriveNoteTitle(content) };
+                if (activeNoteVersion) {
+                    payload.updated_at = activeNoteVersion;
+                }
                 const url = activeNoteId ? `/api/notes/${activeNoteId}` : "/api/notes";
                 const method = activeNoteId ? "PUT" : "POST";
+                const statusLabel = isAutosave ? "Autosaving…" : "Saving…";
+                setNoteSaving(true, statusLabel);
+                setStatus(statusLabel.replace("…", "..."), "info", { ttl: isAutosave ? 3600 : 5200 });
                 try {
-                    const res = await fetch(url, {
+                    const data = await fetchJson(url, {
                         method,
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify(payload),
                     });
-                    if (!res.ok) throw new Error(`save failed (${res.status})`);
-                    const data = await res.json();
                     const note = data.note;
                     activeNoteId = note.id;
+                    activeNoteVersion = note.updated_at || null;
+                    lastSavedContent = note.content || content;
                     markNoteDirty(false);
-                    if (noteUpdated) {
-                        const ts = note.updated_at ? new Date(note.updated_at).toLocaleString() : "";
-                        noteUpdated.textContent = ts ? `Last saved ${ts}` : "";
-                    }
+                    updateNoteMeta(note.updated_at, isAutosave ? "Autosaved" : "Last saved");
+                    hideNoteRecovery();
+                    clearDraft(null);
+                    clearDraft(activeNoteId);
                     await refreshNotes(false);
+                    setStatus(isAutosave ? "Autosaved" : "Note saved", "success", { ttl: isAutosave ? 2400 : 3600 });
+                    if (!isAutosave) {
+                        showToast("Note saved", "success");
+                    } else if (options.reason === "exit-note") {
+                        showToast("Autosaved before leaving notes", "info", { duration: 2400 });
+                    }
                     return note;
                 } catch (e) {
+                    if (e.status === 409) {
+                        const serverNote =
+                            (e.payload && e.payload.detail && e.payload.detail.note) || (e.payload && e.payload.note);
+                        const userCopy = content;
+                        if (serverNote) {
+                            activeNoteId = serverNote.id || activeNoteId;
+                            activeNoteVersion = serverNote.updated_at || null;
+                            lastSavedContent = serverNote.content || "";
+                            if (noteInput) noteInput.value = serverNote.content || "";
+                            renderNotePreview();
+                            updateNoteMeta(serverNote.updated_at, "Reloaded");
+                            markNoteDirty(false);
+                        }
+                        persistDraft(userCopy, activeNoteId);
+                        showToast("Newer version found — loaded server copy.", "error", {
+                            actionText: "Reapply my draft",
+                            onAction: () => {
+                                if (noteInput) {
+                                    noteInput.value = userCopy;
+                                    renderNotePreview();
+                                    markNoteDirty(true);
+                                    scheduleAutosave("conflict");
+                                }
+                            },
+                            duration: 9000,
+                        });
+                        renderNoteRecovery("Conflict detected — newer copy on server.", () => {
+                            if (noteInput) {
+                                noteInput.value = userCopy;
+                                renderNotePreview();
+                                markNoteDirty(true);
+                                scheduleAutosave("conflict");
+                            }
+                            showToast("Draft restored", "success");
+                        });
+                        setStatus("Loaded newer server copy; your draft is preserved.", "error", { ttl: 9000 });
+                        return null;
+                    }
                     console.warn("Failed to save note", e);
                     if (noteStatus) noteStatus.textContent = "Save failed — try again.";
+                    surfaceError(e.message || "Failed to save note");
+                    persistDraft(content, activeNoteId);
                     return null;
+                } finally {
+                    setNoteSaving(false);
                 }
             }
 
-            async function maybeSaveActiveNote() {
+            async function maybeSaveActiveNote(reason = "autosave") {
                 if (noteChanged) {
-                    return await saveActiveNote();
+                    return await saveActiveNote({ isAutosave: true, reason });
                 }
                 return null;
             }
 
             async function selectNote(noteId) {
                 if (noteId === activeNoteId) return;
-                await maybeSaveActiveNote();
+                await maybeSaveActiveNote("switch-note");
                 await loadNote(noteId);
             }
 
             function newNote() {
                 activeNoteId = null;
+                activeNoteVersion = null;
+                lastSavedContent = "";
+                hideNoteRecovery();
+                if (noteAutosaveTimer) {
+                    clearTimeout(noteAutosaveTimer);
+                    noteAutosaveTimer = null;
+                }
+                setStatus("Starting a new draft", "info", { ttl: 2400 });
+                let restoredDraft = null;
                 if (noteInput) {
-                    noteInput.value = "";
+                    const draft = readDraft(null);
+                    restoredDraft = draft && draft.content;
+                    noteInput.value = restoredDraft || "";
                     noteInput.focus();
                 }
-                markNoteDirty(false);
+                markNoteDirty(!!restoredDraft);
+                if (restoredDraft) {
+                    persistDraft(restoredDraft, null);
+                    scheduleAutosave("restore-draft");
+                }
                 renderNotePreview();
                 if (noteUpdated) noteUpdated.textContent = "Draft note — not saved yet.";
+                maybeOfferDraft(null, noteInput ? noteInput.value : "", null);
                 renderNotesList(noteCache);
             }
 
@@ -522,6 +897,8 @@ def index() -> HTMLResponse:
                 document.body.classList.add("note-mode");
                 document.body.classList.remove("show-history");
                 historyOpen = false;
+                setStatus("Entering note mode…", "info", { ttl: 3200 });
+                if (noteStatus) noteStatus.textContent = "Loading notebook…";
                 if (historyBtn) {
                     historyBtn.textContent = "History";
                     historyBtn.disabled = true;
@@ -534,16 +911,27 @@ def index() -> HTMLResponse:
                         await loadNote(activeNoteId);
                     } else if (noteCache.length) {
                         await loadNote(noteCache[0].id);
+                    } else {
+                        maybeOfferDraft(null, noteInput ? noteInput.value : "", null);
                     }
                 }
                 if (noteInput) noteInput.focus();
+                setStatus("Notebook ready", "success", { ttl: 2400 });
                 flushMathQueue();
             }
 
             async function exitNoteMode() {
-                await maybeSaveActiveNote();
+                if (noteAutosaveTimer) {
+                    clearTimeout(noteAutosaveTimer);
+                    noteAutosaveTimer = null;
+                }
+                if (noteChanged) {
+                    setStatus("Autosaving before leaving notes…", "info", { ttl: 3200 });
+                }
+                await autosaveNote("exit-note");
                 noteMode = false;
                 document.body.classList.remove("note-mode");
+                setStatus("Back to chat mode", "success", { ttl: 2200 });
                 if (historyBtn) {
                     historyBtn.disabled = false;
                 }
@@ -552,10 +940,14 @@ def index() -> HTMLResponse:
             async function uploadImage(file) {
                 const form = new FormData();
                 form.append("file", file, file.name || "pasted-image");
-                const res = await fetch("/api/note_assets", { method: "POST", body: form });
-                if (!res.ok) return null;
-                const data = await res.json();
-                return data.path;
+                try {
+                    const data = await fetchJson("/api/note_assets", { method: "POST", body: form });
+                    showToast("Image uploaded", "success", { duration: 1800 });
+                    return data.path;
+                } catch (e) {
+                    surfaceError(e.message || "Upload failed");
+                    return null;
+                }
             }
 
             async function handleNotePaste(event) {
@@ -571,6 +963,8 @@ def index() -> HTMLResponse:
                                 insertAtCursor(noteInput, `![pasted image](${path})\\n`);
                                 renderNotePreview();
                                 markNoteDirty(true);
+                                persistDraft();
+                                scheduleAutosave("pasted-image");
                             }
                             return;
                         }
@@ -597,6 +991,8 @@ def index() -> HTMLResponse:
                 insertAtCursor(noteInput, `${stamp}\\n`);
                 markNoteDirty(true);
                 renderNotePreview();
+                persistDraft();
+                scheduleAutosave("timestamp");
                 noteInput.focus();
             }
 
@@ -661,9 +1057,14 @@ def index() -> HTMLResponse:
             }
 
             async function deleteMessage(chunkId, el) {
-                const res = await fetch(`/api/messages/${chunkId}`, { method: 'DELETE' });
-                if (res.ok && el) {
-                    el.remove();
+                try {
+                    const data = await fetchJson(`/api/messages/${chunkId}`, { method: 'DELETE' });
+                    if (data.deleted && el) {
+                        el.remove();
+                    }
+                } catch (e) {
+                    console.warn("Delete failed", e);
+                    surfaceError(e.message || "Failed to delete message");
                 }
             }
 
@@ -673,12 +1074,14 @@ def index() -> HTMLResponse:
                 if (!text) return;
                 if (text === '/note') {
                     inputEl.value = '';
+                    setStatus("Opening notebook…", "info", { ttl: 2400 });
                     await enterNoteMode();
                     return;
                 }
                 if (text === '/clear') {
                     if (logEl) logEl.innerHTML = '';
                     inputEl.value = '';
+                    clearStatus();
                     setSending(false);
                     return;
                 }
@@ -686,17 +1089,21 @@ def index() -> HTMLResponse:
                     inputEl.value = '';
                     renderMessage('system', '[rss] fetching feeds...', null, new Date().toISOString());
                     setSending(true);
+                    setStatus("Refreshing RSS feeds…", "info", { ttl: 6000 });
                     try {
                         const debug = !!(debugToggle && debugToggle.checked);
-                        const res = await fetch('/api/rss', {
+                        const data = await fetchJson('/api/rss', {
                             method: 'POST',
                             headers: {'Content-Type': 'application/json'},
                             body: JSON.stringify({ debug })
                         });
-                        const data = await res.json();
                         (data.messages || []).forEach(m => renderMessage(m.role, m.content, m.chunk_id, m.created_at, m.debug, m.metadata));
+                        showToast("RSS refresh complete", "success");
+                        setStatus("RSS refresh complete", "success", { ttl: 3200 });
                     } catch (e) {
                         console.warn('rss failed', e);
+                        renderMessage('system', `[rss] failed: ${e.message || 'error'}`, null, new Date().toISOString());
+                        surfaceError(e.message || "RSS fetch failed");
                     } finally {
                         setSending(false);
                         if (inputEl) inputEl.focus();
@@ -706,16 +1113,24 @@ def index() -> HTMLResponse:
                 renderMessage('user', text, null, new Date().toISOString());
                 inputEl.value = '';
                 setSending(true);
+                setStatus("Contacting backend…", "info", { ttl: 6000 });
                 try {
-                    const res = await fetch('/api/chat', {
+                    const data = await fetchJson('/api/chat', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({ text, debug: debugToggle.checked })
+                        body: JSON.stringify({ text, debug: !!(debugToggle && debugToggle.checked) })
                     });
-                    const data = await res.json();
                     (data.messages || []).forEach(m => renderMessage(m.role, m.content, m.chunk_id, m.created_at, m.debug, m.metadata));
+                    if (!data.messages || !data.messages.length) {
+                        renderMessage('system', 'No response from backend.', null, new Date().toISOString());
+                        surfaceError("Backend returned no response", { duration: 4200 });
+                    } else {
+                        setStatus(`LLM replied at ${new Date().toLocaleTimeString()}`, "success", { ttl: 3600 });
+                    }
                 } catch (e) {
                     console.warn('chat failed', e);
+                    renderMessage('system', `Chat failed: ${e.message || 'error'}`, null, new Date().toISOString());
+                    surfaceError(e.message || "Chat failed");
                 } finally {
                     setSending(false);
                     if (inputEl) inputEl.focus();
@@ -792,9 +1207,7 @@ def index() -> HTMLResponse:
             }
 
             async function fetchHistoryDay(day) {
-                const res = await fetch(`/api/messages?day=${encodeURIComponent(day)}`);
-                if (!res.ok) throw new Error(`history fetch failed (${res.status})`);
-                const data = await res.json();
+                const data = await fetchJson(`/api/messages?day=${encodeURIComponent(day)}`);
                 const msgs = data.messages || [];
                 historyLoadedDays[day] = msgs;
                 return msgs;
@@ -915,6 +1328,7 @@ def index() -> HTMLResponse:
                     } catch (e) {
                         console.warn('history day load failed', e);
                         body.innerHTML = '<div class="history-subtle">Failed to load.</div>';
+                        surfaceError(e.message || "Failed to load history day");
                     }
                 } else {
                     renderDayMessages(day, historyLoadedDays[day], body);
@@ -928,13 +1342,13 @@ def index() -> HTMLResponse:
                 await toggleDay(day, true);
             }
 
-            async function loadHistory(autoExpand = true) {
+            async function loadHistory(autoExpand = true, notifySuccess = false) {
                 if (historyList) {
                     historyList.innerHTML = '<div class="history-subtle">Loading history…</div>';
                 }
+                setStatus("Loading history…", "info", { ttl: 3600 });
                 try {
-                    const res = await fetch('/api/messages/days');
-                    const data = await res.json();
+                    const data = await fetchJson('/api/messages/days');
                     historyDayMeta = data.days || [];
                     if (!expandedMonths.size && historyDayMeta.length) {
                         const todayMonth = new Date().toISOString().slice(0, 7);
@@ -949,9 +1363,14 @@ def index() -> HTMLResponse:
                             await openDay(preferred);
                         }
                     }
+                    setStatus("History refreshed", "success", { ttl: 2600 });
+                    if (notifySuccess) {
+                        showToast("History refreshed", "success", { duration: 1800 });
+                    }
                 } catch (e) {
                     console.warn('history load failed', e);
                     if (historyList) historyList.innerHTML = '<div class="history-subtle">History unavailable.</div>';
+                    surfaceError(e.message || "History unavailable");
                 }
             }
 
@@ -965,7 +1384,7 @@ def index() -> HTMLResponse:
                 historyDayMeta = [];
                 openHistoryDays = new Set();
                 expandedMonths = new Set();
-                loadHistory(true);
+                loadHistory(true, true);
             }
 
             function toggleHistory() {
@@ -979,8 +1398,10 @@ def index() -> HTMLResponse:
                     expandedMonths = new Set();
                     loadHistory();
                     if (historyBtn) historyBtn.textContent = 'Hide history';
+                    setStatus("History opened", "info", { ttl: 2200 });
                 } else {
                     if (historyBtn) historyBtn.textContent = 'History';
+                    setStatus("History hidden", "info", { ttl: 1800 });
                 }
             }
 
@@ -1013,8 +1434,14 @@ def index() -> HTMLResponse:
 
             if (noteInput) {
                 noteInput.addEventListener('input', () => {
-                    markNoteDirty(true);
+                    const content = noteInput.value;
+                    const changed = content !== lastSavedContent;
+                    markNoteDirty(changed);
                     renderNotePreview();
+                    if (changed) {
+                        persistDraft(content);
+                        scheduleAutosave("typing");
+                    }
                 });
                 noteInput.addEventListener('paste', handleNotePaste);
                 noteInput.addEventListener('keydown', (e) => {
@@ -1023,7 +1450,24 @@ def index() -> HTMLResponse:
                         saveActiveNote();
                     }
                 });
+                noteInput.addEventListener('blur', () => {
+                    if (noteChanged) {
+                        persistDraft();
+                        scheduleAutosave("blur");
+                    }
+                });
             }
+            window.addEventListener("visibilitychange", () => {
+                if (document.visibilityState === "hidden" && noteMode && noteInput && noteChanged) {
+                    persistDraft();
+                    autosaveNote("visibilitychange");
+                }
+            });
+            window.addEventListener("beforeunload", () => {
+                if (noteInput && noteChanged) {
+                    persistDraft();
+                }
+            });
             if (mathScript) {
                 mathScript.addEventListener('load', flushMathQueue);
             }
@@ -1071,7 +1515,12 @@ def api_get_note(note_id: int) -> dict:
 def api_create_note(payload=Body(...)) -> dict:
     content = (payload or {}).get("content", "")
     title = (payload or {}).get("title")
-    note = workspace.save_note(content or "", title=title)
+    try:
+        note = workspace.save_note(content or "", title=title)
+    except NoteConflictError as e:
+        raise HTTPException(status_code=409, detail={"reason": "conflict", "note": note_dict(e.note) if e.note else None})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
     if not note:
         raise HTTPException(status_code=500, detail="failed to save note")
     return {"note": note_dict(note)}
@@ -1081,7 +1530,13 @@ def api_create_note(payload=Body(...)) -> dict:
 def api_update_note(note_id: int, payload=Body(...)) -> dict:
     content = (payload or {}).get("content", "")
     title = (payload or {}).get("title")
-    note = workspace.save_note(content or "", title=title, note_id=note_id)
+    expected_updated_at = (payload or {}).get("updated_at") or (payload or {}).get("expected_updated_at")
+    try:
+        note = workspace.save_note(content or "", title=title, note_id=note_id, expected_updated_at=expected_updated_at)
+    except NoteConflictError as e:
+        raise HTTPException(status_code=409, detail={"reason": "conflict", "note": note_dict(e.note) if e.note else None})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
     if not note:
         raise HTTPException(status_code=404, detail="note not found")
     return {"note": note_dict(note)}
@@ -1148,25 +1603,28 @@ def chat(payload=Body(...)) -> dict:
     debug = bool((payload or {}).get("debug"))
     if not text:
         return {"messages": []}
-    if text.strip().startswith("/add"):
-        logs = handle_add(text.strip().removeprefix("/add").strip(), workspace, orchestrator, debug=debug)
-        return {"messages": [make_system_msg(log["text"]) | {"debug": log.get("debug")} for log in logs]}
-    reply = orchestrator.timelinereply(text)
-    if isinstance(reply, list):
-        messages = [msg_to_dict(m) for m in reply]
-    else:
-        messages = [{
-            "content": str(reply),
-            "role": "assistant",
-            "created_at": datetime.now(UTC).isoformat(),
-            "reference_time": None,
-            "metadata": {},
-            "chunk_id": None,
-        }]
-    if debug:
-        for m in messages:
-            m["debug"] = orchestrator.last_llm_trace
-    return {"messages": messages}
+    try:
+        if text.strip().startswith("/add"):
+            logs = handle_add(text.strip().removeprefix("/add").strip(), workspace, orchestrator, debug=debug)
+            return {"messages": [make_system_msg(log["text"]) | {"debug": log.get("debug")} for log in logs]}
+        reply = orchestrator.timelinereply(text)
+        if isinstance(reply, list):
+            messages = [msg_to_dict(m) for m in reply]
+        else:
+            messages = [{
+                "content": str(reply),
+                "role": "assistant",
+                "created_at": datetime.now(UTC).isoformat(),
+                "reference_time": None,
+                "metadata": {},
+                "chunk_id": None,
+            }]
+        if debug:
+            for m in messages:
+                m["debug"] = orchestrator.last_llm_trace
+        return {"messages": messages}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/add")
@@ -1175,8 +1633,11 @@ def add(payload=Body(...)) -> dict:
     debug = bool((payload or {}).get("debug"))
     if not text:
         return {"logs": ["[add] missing text"]}
-    logs = handle_add(text, workspace, orchestrator, debug=debug)
-    return {"logs": [log["text"] for log in logs]}
+    try:
+        logs = handle_add(text, workspace, orchestrator, debug=debug)
+        return {"logs": [log["text"] for log in logs]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/rss")

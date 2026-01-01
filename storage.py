@@ -28,6 +28,14 @@ class StoredChunk:
     focus_hint: Optional[str]
 
 
+class NoteConflictError(Exception):
+    """Raised when a note save collides with a newer version on disk."""
+
+    def __init__(self, note: Optional[dict], message: str | None = None) -> None:
+        super().__init__(message or "note conflict")
+        self.note = note or {}
+
+
 class LocalStore:
     """SQLite + FAISS-backed store for documents/chunks/events."""
 
@@ -395,7 +403,32 @@ class LocalStore:
             row = cur.fetchone()
         return self._row_to_message(row) if row else None
 
-    def save_note(self, content: str, title: Optional[str] = None, note_id: Optional[int] = None) -> Optional[dict]:
+    def _build_note_payload(
+        self,
+        doc_row: sqlite3.Row,
+        chunk_row: Optional[sqlite3.Row],
+        images: List[str],
+        updated_at: Optional[str],
+        created_at: Optional[str],
+        note_id: int,
+        title: str,
+    ) -> dict:
+        return {
+            "id": note_id,
+            "title": title,
+            "content": chunk_row["text"] if chunk_row else "",
+            "created_at": ensure_utc(datetime.fromisoformat(created_at)).isoformat() if created_at else None,
+            "updated_at": ensure_utc(datetime.fromisoformat(updated_at)).isoformat() if updated_at else None,
+            "images": images,
+        }
+
+    def save_note(
+        self,
+        content: str,
+        title: Optional[str] = None,
+        note_id: Optional[int] = None,
+        expected_updated_at: Optional[str] = None,
+    ) -> Optional[dict]:
         now = datetime.now(UTC)
         now_iso = ensure_utc(now).isoformat()
         title = self._derive_note_title(content, provided=title)
@@ -404,6 +437,12 @@ class LocalStore:
         if images:
             base_tags["images"] = images
         embeddings = self._maybe_embed([content])
+        expected_dt = None
+        if expected_updated_at:
+            try:
+                expected_dt = ensure_utc(datetime.fromisoformat(expected_updated_at))
+            except Exception:
+                expected_dt = None
         with self._connect() as conn:
             cur = conn.cursor()
             if note_id:
@@ -411,10 +450,6 @@ class LocalStore:
                 doc_row = cur.fetchone()
                 if not doc_row:
                     return None
-                cur.execute(
-                    "UPDATE documents SET title = ?, event_at = ?, tags = ? WHERE id = ?",
-                    (title, now_iso, json.dumps(base_tags | {"note_title": title}), note_id),
-                )
                 cur.execute(
                     """
                     SELECT * FROM chunks
@@ -425,6 +460,33 @@ class LocalStore:
                     (note_id,),
                 )
                 chunk_row = cur.fetchone()
+                tags = json.loads(doc_row["tags"]) if doc_row["tags"] else {}
+                server_title = doc_row["title"] or tags.get("note_title") or "Untitled note"
+                server_updated_raw = doc_row["event_at"] or doc_row["created_at"]
+                server_created_raw = doc_row["created_at"]
+                server_images = tags.get("images") or []
+                if expected_dt and server_updated_raw:
+                    try:
+                        server_dt = ensure_utc(datetime.fromisoformat(server_updated_raw))
+                        if server_dt and server_dt > expected_dt:
+                            conflict_note = self._build_note_payload(
+                                doc_row,
+                                chunk_row,
+                                server_images,
+                                server_updated_raw,
+                                server_created_raw,
+                                note_id,
+                                server_title,
+                            )
+                            raise NoteConflictError(conflict_note)
+                    except NoteConflictError:
+                        raise
+                    except Exception:
+                        pass
+                cur.execute(
+                    "UPDATE documents SET title = ?, event_at = ?, tags = ? WHERE id = ?",
+                    (title, now_iso, json.dumps(base_tags | {"note_title": title}), note_id),
+                )
                 chunk_id = chunk_row["id"] if chunk_row else None
                 chunk_tags = base_tags | {"note_id": note_id, "note_title": title}
                 tags_json = json.dumps(chunk_tags)

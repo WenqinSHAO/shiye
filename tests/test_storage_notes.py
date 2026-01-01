@@ -1,4 +1,6 @@
-from storage import LocalStore
+import pytest
+
+from storage import LocalStore, NoteConflictError
 
 
 def make_store(tmp_path):
@@ -34,3 +36,19 @@ def test_image_references_are_captured(tmp_path):
     assert "/assets/img/test.png" in note["images"]
     again = store.get_note(note["id"])
     assert "/assets/img/test.png" in again["images"]
+
+
+def test_save_note_conflict(tmp_path):
+    store = make_store(tmp_path)
+    original = store.save_note("first", title="Conflict")
+    assert original["updated_at"]
+    # Update once to move the server version forward
+    latest = store.save_note("second", title="Conflict", note_id=original["id"])
+    assert latest["updated_at"] != original["updated_at"]
+    with pytest.raises(NoteConflictError):
+        store.save_note(
+            "stale overwrite",
+            title="Conflict",
+            note_id=original["id"],
+            expected_updated_at=original["updated_at"],
+        )

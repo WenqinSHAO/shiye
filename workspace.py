@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from datatypes import Message, ensure_utc
 from embeddings import EmbeddingProvider
-from storage import LocalStore
+from storage import LocalStore, NoteConflictError
 
 
 @dataclass
@@ -106,9 +106,15 @@ class MemoryWorkspace:
                 return True
         return False
 
-    def save_note(self, content: str, title: Optional[str] = None, note_id: Optional[int] = None) -> Optional[dict]:
+    def save_note(
+        self,
+        content: str,
+        title: Optional[str] = None,
+        note_id: Optional[int] = None,
+        expected_updated_at: Optional[str] = None,
+    ) -> Optional[dict]:
         if self.store:
-            return self.store.save_note(content, title=title, note_id=note_id)
+            return self.store.save_note(content, title=title, note_id=note_id, expected_updated_at=expected_updated_at)
         derived_title = (title or "").strip()
         if not derived_title:
             for line in content.splitlines():
@@ -118,6 +124,12 @@ class MemoryWorkspace:
                     break
         derived_title = derived_title or "Untitled note"
         now_iso = datetime.now(UTC).isoformat()
+        expected_dt = None
+        if expected_updated_at:
+            try:
+                expected_dt = ensure_utc(datetime.fromisoformat(expected_updated_at))
+            except Exception:
+                expected_dt = None
         images = []
         if "!(" in content:
             import re as _re  # local import to avoid top-level dependency when unused
@@ -125,6 +137,17 @@ class MemoryWorkspace:
         if note_id:
             for note in self._fallback_notes:
                 if note["id"] == note_id:
+                    if expected_dt:
+                        try:
+                            current_ts = note.get("updated_at") or note.get("created_at")
+                            if current_ts:
+                                current_dt = ensure_utc(datetime.fromisoformat(current_ts))
+                                if current_dt > expected_dt:
+                                    raise NoteConflictError(note)
+                        except NoteConflictError:
+                            raise
+                        except Exception:
+                            pass
                     note.update(
                         {
                             "title": derived_title,

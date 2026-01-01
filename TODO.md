@@ -65,14 +65,14 @@
 **Goal**: Make existing features production-ready
 
 1. **UI Resilience**
-   - [ ] Surface backend errors in web UI (LLM failures, storage issues)
-   - [ ] Add draft recovery for notes (localStorage backup)
-   - [ ] Improve loading states and error messages
-   - [ ] Add toast notifications for background operations
+   - [x] Surface backend errors in web UI (LLM failures, storage issues)
+   - [x] Add draft recovery for notes (localStorage backup)
+   - [x] Improve loading states and error messages
+   - [x] Add toast notifications for background operations
 
 2. **Note Improvements**
-   - [ ] Implement autosave with conflict resolution
-   - [ ] Autosave when going back to chat mode
+   - [x] Implement autosave with conflict resolution
+   - [x] Autosave when going back to chat mode
 
 ### Phase 2: Enhanced Retrieval (v0.7)
 
