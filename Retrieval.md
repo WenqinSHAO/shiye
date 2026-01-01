@@ -1,8 +1,131 @@
 # Enhanced Retrieval Design for Shiye
 
-**Purpose**: Design guideline for implementing Phase 2 (v0.7) hybrid retrieval system.  
-**Status**: Planning document - not yet implemented.  
-**Target**: Provide detailed specifications for coding agent to implement enhanced search.
+**Purpose**: Design guideline and implementation documentation for Phase 2 (v0.7) hybrid retrieval system.  
+**Status**: ✅ COMPLETED - Production-ready for testing and user feedback  
+**Documentation**: This document provides both the original design specs and actual implementation details with code entry points.
+
+---
+
+## Implementation Overview (v0.7)
+
+### What Was Built
+
+The enhanced retrieval system combines **dense semantic search (FAISS)** with **sparse keyword search (SQLite FTS5)** using Reciprocal Rank Fusion (RRF), followed by optional cross-encoder reranking and multi-cue post-processing. Users can search stored content via the `/find` command with filter support.
+
+### Key Features Delivered
+
+1. **Hybrid Retrieval Pipeline**
+   - Dense: FAISS semantic embedding search (top-500 over-retrieve → metadata filter)
+   - Sparse: SQLite FTS5 BM25 keyword search with full filter support
+   - RRF Fusion: Combines rankings without hyperparameter tuning
+   - Reranking: Optional FlashRank cross-encoder for top candidates
+
+2. **Multi-Cue Scoring**
+   - Recency boost (linear decay over 30 days)
+   - Document type preferences (notes > papers > web pages > RSS)
+   - Exact phrase match boost (1.5x multiplier)
+   - Deduplication (keep best chunk per document)
+
+3. **Citation-Aware Schema**
+   - New columns: `char_start`, `char_end`, `embedding_model`, `chunk_window`
+   - Enables precise offset tracking for future citation features
+   - Populated for all ingestion paths (chat, notes, web, RSS)
+
+4. **User Interface**
+   - `/find <query>` command with filter syntax
+   - Filters: `type:note`, `tag:project`, `before:2025-01-01`, `after:2024-12-01`, `time:event/created/ingested`
+   - HTML results with scores, timestamps, text previews, source links
+
+### Code Entry Points
+
+| Component | Module | Key Methods | Lines |
+|-----------|--------|-------------|-------|
+| **Search Pipeline** | `storage.py` | `search(request)` | 1055-1126 |
+| **Dense Retrieval** | `storage.py` | `_dense_retrieval(request)` | 893-942 |
+| **Sparse Retrieval** | `storage.py` | `_sparse_retrieval(request)` | 979-1040 |
+| **RRF Fusion** | `storage.py` | `_fuse_rrf(results, k)` | 1042-1053 |
+| **Schema Migration** | `storage.py` | `_migrate_schema_v2()` | 168-291 |
+| **Reranker** | `retrieval.py` | `FlashRankReranker` | 92-119 |
+| **Post-Processors** | `retrieval.py` | `RecencyBooster`, `TypeBooster`, etc. | 121-207 |
+| **Context Packer** | `retrieval.py` | `ContextPacker.pack()` | 211-247 |
+| **Workspace Entry** | `workspace.py` | `search(request)` | 197-225 |
+| **Web UI** | `web.py` | `handle_search(query)` | 1698-1745 |
+| **Dataclasses** | `retrieval.py` | `SearchRequest`, `Candidate`, `SearchHit` | 27-86 |
+
+### Configuration (config.py)
+
+```python
+SHIYE_RERANKER = "flashrank"       # flashrank, bge, or none
+SHIYE_SEARCH_TOP_K = 20            # Results to return
+SHIYE_RRF_K = 60                   # RRF fusion constant
+SHIYE_RECENCY_DECAY_DAYS = 30      # Recency boost window
+SHIYE_RERANK_TOP_K = 50            # Candidates to rerank
+```
+
+### Usage Examples
+
+**Web UI:**
+```
+/find kubernetes networking
+/find type:note after:2024-12-01 kubernetes deployment
+/find tag:project time:event before:2025-01-15 architecture
+```
+
+**Programmatic:**
+```python
+from retrieval import SearchRequest
+request = SearchRequest(
+    query="kubernetes networking",
+    filters={'doc_type': 'note', 'after': '2024-12-01'},
+    top_k=20,
+    enable_rerank=True
+)
+hits = workspace.search(request)
+for hit in hits:
+    print(f"{hit.rank}. [{hit.doc_type}] {hit.doc_title}")
+    print(f"   Score: {hit.scores['final']:.3f} | {hit.event_at}")
+    print(f"   {hit.text[:200]}...")
+```
+
+### Architecture Flow
+
+```
+User Query → Parse Filters → Multi-Retrieval → Fusion → Rerank → Post-Process → Results
+
+1. Parse: Extract filters (type:, tag:, before:, after:, time:) from query string
+2. Dense: FAISS semantic search (top-500) → metadata filter → Candidate[]
+3. Sparse: FTS5 BM25 keyword search → metadata filter → Candidate[]
+4. Fusion: RRF combines rankings → deduplicated Candidate[]
+5. Rerank: FlashRank cross-encoder (top-50) → re-scored Candidate[]
+6. Post-Process:
+   - RecencyBooster: Linear decay over 30 days
+   - TypeBooster: Prefer notes > papers > web pages
+   - ExactMatchBooster: 1.5x for exact phrase matches
+   - Deduplicator: Keep best chunk per document
+7. Results: Convert Candidate → SearchHit with full metadata
+```
+
+### Testing
+
+- **Unit Tests**: `tests/test_retrieval.py` - 13 tests covering all components
+- **Integration Tests**: `tests/test_storage.py` - end-to-end search pipeline
+- **Manual Testing**: Web UI `/find` command with various queries and filters
+
+### Known Limitations
+
+1. **chunk_window column unpopulated**: Exists in schema but not written during ingestion
+2. **Orchestrator integration deferred**: LLM context assembly not yet using ContextPacker
+3. **No exact-match retriever**: Exact matching done via post-processor boost, not separate channel
+4. **Evaluation framework pending**: Golden query set and Recall@K metrics not yet implemented
+5. **FTS5 unavailability UI notice**: Only logs when FTS5 unavailable, no user-facing message
+
+### Future Enhancements (v0.8+)
+
+- Populate `chunk_window` for surrounding context display
+- Integrate ContextPacker into orchestrator for LLM context assembly
+- Add exact-match retrieval channel (SQL LIKE queries)
+- Create evaluation framework with golden query set
+- UI notice when FTS5 unavailable (banner or system message)
 
 ---
 
