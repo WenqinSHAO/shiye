@@ -218,3 +218,8 @@ __marimo__/
 # virtualenv
 dspytest/
 .virtualenvs/
+
+# assests for local notes
+/assetts/
+
+
