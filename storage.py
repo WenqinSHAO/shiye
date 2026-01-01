@@ -1069,6 +1069,7 @@ class LocalStore:
                 chunk_id=row['id'],
                 score=float(score_map[row['id']]),
                 channel='dense',
+                full_text=row['text'] if row['text'] else "",
                 doc_id=row['document_id'],
                 doc_type=row['doc_type'],
                 timestamp=ensure_utc(datetime.fromisoformat(timestamp_str)) if timestamp_str else None,
@@ -1125,7 +1126,7 @@ class LocalStore:
             FROM chunks_fts AS f
             JOIN chunks c ON f.chunk_id = c.id
             JOIN documents d ON c.document_id = d.id
-            WHERE f MATCH ?
+            WHERE chunks_fts MATCH ?
               AND c.deleted = 0
             """
             
@@ -1192,6 +1193,7 @@ class LocalStore:
                 chunk_id=row['chunk_id'],
                 score=normalized_score,
                 channel='sparse',
+                full_text=row['text'] if row['text'] else "",
                 doc_id=row['document_id'],
                 doc_type=row['doc_type'],
                 timestamp=ensure_utc(datetime.fromisoformat(timestamp_str)) if timestamp_str else None,

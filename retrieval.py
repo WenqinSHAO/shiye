@@ -27,6 +27,7 @@ class Candidate:
     chunk_id: int
     score: float
     channel: str  # 'dense', 'sparse', 'exact', 'fused', 'rerank'
+    full_text: Optional[str] = None  # full chunk text for exact matching/boosting
     doc_id: Optional[int] = None
     doc_type: Optional[str] = None
     timestamp: Optional[datetime] = None
@@ -242,7 +243,9 @@ class ExactMatchBooster:
         
         query_lower = request.query.lower()
         for c in candidates:
-            if c.text_preview and query_lower in c.text_preview.lower():
+            # Use full text when available to avoid missing matches outside the preview
+            text_to_check = (c.full_text or c.text_preview or "").lower()
+            if text_to_check and query_lower in text_to_check:
                 c.score *= self.boost_factor
                 c.score_history['exact_match_boost'] = self.boost_factor
         
