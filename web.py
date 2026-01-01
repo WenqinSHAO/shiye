@@ -191,6 +191,21 @@ def index() -> HTMLResponse:
             .note-banner.show { display: inline-flex; }
             .note-banner button { font-size: 12px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); cursor: pointer; }
             .note-pill.inline { padding: 4px 10px; font-size: 12px; }
+            
+            /* Search Results Styling */
+            .search-results { margin: 10px 0; }
+            .search-header { margin-bottom: 12px; padding: 8px 12px; background: var(--accent-soft); border: 1px solid var(--border); border-radius: 8px; font-size: 13px; color: var(--ink); }
+            .search-hit { margin-bottom: 12px; padding: 12px 14px; border-radius: 10px; background: #fff; border: 1px solid var(--border); box-shadow: 0 1px 4px rgba(15, 23, 42, 0.04); transition: border-color 0.15s ease, box-shadow 0.15s ease; }
+            .search-hit:hover { border-color: var(--accent); box-shadow: 0 2px 8px rgba(91, 141, 239, 0.15); }
+            .search-hit .hit-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; font-size: 12px; }
+            .search-hit .hit-type { padding: 3px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+            .search-hit .hit-score { color: var(--subtle); }
+            .search-hit .hit-date { margin-left: auto; color: var(--subtle); }
+            .search-hit .hit-title { font-weight: 600; margin-bottom: 6px; color: var(--ink); }
+            .search-hit .hit-text { line-height: 1.5; color: var(--ink); margin-bottom: 6px; }
+            .search-hit .hit-source { font-size: 12px; }
+            .search-hit .hit-source a { color: var(--accent); text-decoration: none; }
+            .search-hit .hit-source a:hover { text-decoration: underline; }
         </style>
     </head>
     <body>
@@ -214,6 +229,7 @@ def index() -> HTMLResponse:
                         <div class="input-footer">
                             <div class="command-strip">
                                 <span class="command-pill">/note</span>
+                                <span class="command-pill">/find</span>
                                 <span class="command-pill">/add</span>
                                 <span class="command-pill">/rss</span>
                                 <span class="command-pill">/summarize</span>
@@ -1670,6 +1686,82 @@ def chat(payload=Body(...)) -> dict:
         if text.strip().startswith("/add"):
             logs = handle_add(text.strip().removeprefix("/add").strip(), workspace, orchestrator, debug=debug)
             return {"messages": [make_system_msg(log["text"]) | {"debug": log.get("debug")} for log in logs]}
+        
+        # Handle /find command for semantic search
+        if text.strip().startswith("/find"):
+            query = text.strip().removeprefix("/find").strip()
+            if not query:
+                return {"messages": [make_system_msg("[find] Please provide a search query. Usage: /find <query>")]}
+            
+            try:
+                from retrieval import SearchRequest
+                
+                # Parse filters from query (simple implementation)
+                # e.g., "/find type:note kubernetes" → filters={'doc_type': 'note'}, query='kubernetes'
+                filters = {}
+                query_parts = []
+                
+                for part in query.split():
+                    if ':' in part and part.split(':')[0] in ['type', 'tag', 'before', 'after']:
+                        key, value = part.split(':', 1)
+                        if key == 'type':
+                            filters['doc_type'] = value
+                        elif key == 'tag':
+                            filters['tags'] = value
+                        elif key == 'before':
+                            filters['before'] = value
+                        elif key == 'after':
+                            filters['after'] = value
+                    else:
+                        query_parts.append(part)
+                
+                clean_query = ' '.join(query_parts) if query_parts else query
+                request = SearchRequest(query=clean_query, filters=filters, top_k=20)
+                hits = workspace.search(request)
+                
+                if not hits:
+                    return {"messages": [make_system_msg(f"[find] No results found for: {clean_query}")]}
+                
+                # Format results as HTML
+                results_html = f"<div class='search-results'><div class='search-header'>Found {len(hits)} results for: <strong>{clean_query}</strong></div>"
+                
+                for hit in hits:
+                    # Format timestamp
+                    timestamp = hit.event_at or hit.created_at
+                    timestamp_str = timestamp.strftime('%Y-%m-%d %H:%M') if timestamp else 'unknown'
+                    
+                    # Truncate text for preview
+                    preview_text = hit.text[:300]
+                    if len(hit.text) > 300:
+                        preview_text += "..."
+                    
+                    # Format score
+                    score = hit.scores.get('final', 0)
+                    
+                    results_html += f"""
+                    <div class='search-hit' data-chunk-id='{hit.chunk_id}'>
+                        <div class='hit-header'>
+                            <span class='hit-type'>{hit.doc_type}</span>
+                            <span class='hit-score'>Score: {score:.3f}</span>
+                            <span class='hit-date'>{timestamp_str}</span>
+                        </div>
+                        <div class='hit-title'>{hit.doc_title or 'Untitled'}</div>
+                        <div class='hit-text'>{preview_text}</div>
+                    """
+                    
+                    if hit.doc_source:
+                        results_html += f"<div class='hit-source'><a href='{hit.doc_source}' target='_blank'>{hit.doc_source}</a></div>"
+                    
+                    results_html += "</div>"
+                
+                results_html += "</div>"
+                
+                return {"messages": [make_system_msg(results_html)]}
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                return {"messages": [make_system_msg(f"[find] Search failed: {str(e)}")]}
+        
         reply = orchestrator.timelinereply(text)
         if isinstance(reply, list):
             messages = [msg_to_dict(m) for m in reply]
