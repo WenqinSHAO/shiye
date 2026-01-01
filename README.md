@@ -49,6 +49,9 @@ Environment variables:
 - `SHIYE_RELOAD` - Enable auto-reload (default: `false`)
 - `SHIYE_EMBED_MODEL` - Embedding model (default: `sentence-transformers/all-MiniLM-L6-v2`)
 - `SHIYE_MODEL_CACHE` - Model cache directory (default: `~/.shiye/models`)
+- `SHIYE_RERANKER` - Reranker to use: `flashrank` (default), `bge`, or `none`
+- `SHIYE_SEARCH_TOP_K` - Number of results to return (default: `20`)
+- `SHIYE_RECENCY_DECAY_DAYS` - Days for recency boost decay (default: `30`)
 
 ## Features
 
@@ -56,15 +59,38 @@ Environment variables:
 
 - **Multi-round Chat**: Conversational interface with DSPy-powered LLM backend
 - **Persistent Memory**: Local SQLite database + FAISS vector embeddings for semantic search
+- **Hybrid Retrieval**: Dense (FAISS) + Sparse (FTS5) search with RRF fusion and optional reranking
 - **Note Taking**: Rich markdown editor with image support and math rendering
 - **Web Content Fetching**: Extract and store content from URLs
 - **RSS Feed Aggregation**: Daily summaries from configured feeds
 - **Time-Aware Context**: Automatic timestamp handling and temporal reasoning
 
+### Enhanced Retrieval (v0.7)
+
+Shiye now features a powerful hybrid search system that combines:
+
+1. **Dense Retrieval**: FAISS-based semantic search using sentence embeddings
+2. **Sparse Retrieval**: SQLite FTS5 keyword search with BM25 scoring
+3. **Reciprocal Rank Fusion (RRF)**: Intelligent combination of dense and sparse results
+4. **Cross-Encoder Reranking**: Optional FlashRank reranking for improved top-k accuracy
+5. **Multi-Cue Scoring**: Recency boost, document type preference, exact match detection
+6. **Smart Deduplication**: Keeps only the best chunk per document
+
+**Search Filters**:
+- `type:<doc_type>` - Filter by document type (note, web_page, chat, paper, rss_daily_summary)
+- `tag:<tag>` - Filter by tag (future implementation)
+- `before:<date>` - Items before date (YYYY-MM-DD format)
+- `after:<date>` - Items after date (YYYY-MM-DD format)
+
 ### Web UI Commands
 
 - **Chat**: Natural conversation with context from stored memories
 - `/note` - Open 3-panel note-taking mode with markdown support
+- `/find <query>` - Semantic search over stored content with filters
+  - Basic search: `/find kubernetes networking`
+  - Filter by type: `/find type:note kubernetes`
+  - Filter by date: `/find after:2024-01-01 kubernetes`
+  - Combine filters: `/find type:note after:2024-12-01 kubernetes`
 - `/add <text>` - Add notes or fetch URL content
   - `/add fetch <url>` - Fetch and store web page content
   - `/add refs <urls>` - Store URL references without fetching
