@@ -97,8 +97,7 @@ def index() -> HTMLResponse:
                 --action-border: #cfd7e2;
             }
             body { font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif; margin: 0; background: var(--bg); color: var(--ink); min-height: 100vh; overflow: hidden; }
-            header { padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--border); display: grid; grid-template-columns: 1fr auto 1fr; gap: 16px; align-items: center; position: sticky; top: 0; z-index: 10; }
-            header > div:first-child, header > div:last-child { position: relative; z-index: 2; }
+            header { padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 12px; position: sticky; top: 0; z-index: 10; }
             main { display: grid; grid-template-columns: 1fr; gap: 12px; padding: 12px 16px; height: calc(100vh - 64px); box-sizing: border-box; overflow: hidden; }
             body.show-history main { grid-template-columns: 2fr auto; }
             body.note-mode main { grid-template-columns: 1fr; }
@@ -192,23 +191,12 @@ def index() -> HTMLResponse:
             .note-banner.show { display: inline-flex; }
             .note-banner button { font-size: 12px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); cursor: pointer; }
             .note-pill.inline { padding: 4px 10px; font-size: 12px; }
-            #status-banner { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 8px; border: 1px solid transparent; background: transparent; color: var(--ink); font-size: 12px; justify-self: center; max-width: 480px; opacity: 0; transform: scale(0.94); transition: opacity 0.18s ease, transform 0.18s ease, background 0.18s ease, border-color 0.18s ease; pointer-events: none; position: relative; z-index: 1; }
-            #status-banner.show { opacity: 1; transform: scale(1); pointer-events: auto; }
-            #status-banner.status-info { border-color: #cddffb; background: #e9f1ff; }
-            #status-banner.status-error { border-color: #fecdd3; background: #fff1f2; color: #7f1d1d; }
-            #status-banner.status-success { border-color: #bbf7d0; background: #ecfdf3; color: #166534; }
-            #status-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 400px; }
-            #status-close { border: 1px solid var(--border); border-radius: 6px; background: rgba(255,255,255,0.7); cursor: pointer; padding: 3px 7px; font-size: 11px; color: var(--subtle); flex-shrink: 0; }
         </style>
     </head>
     <body>
         <header>
             <div><strong>Shiye</strong> — Your personal knowledge base</div>
-            <div id="status-banner" role="status" aria-live="polite">
-                <span id="status-text"></span>
-                <button id="status-close" type="button" aria-label="Dismiss status">✕</button>
-            </div>
-            <div class="row" style="justify-self: end;">
+            <div class="row">
                 <label style="display:flex;align-items:center;gap:6px;color:#4b5563;font-size:12px;">
                     <input type="checkbox" id="debugToggle" onclick="toggleDebug()" checked />
                     debug
@@ -314,9 +302,6 @@ def index() -> HTMLResponse:
             const noteStatus = document.getElementById('noteStatus');
             const noteRecovery = document.getElementById('note-recovery');
             const mathScript = document.getElementById('mathjax-script');
-            const statusBanner = document.getElementById('status-banner');
-            const statusText = document.getElementById('status-text');
-            const statusClose = document.getElementById('status-close');
             function normalizeLinkValue(val) {
                 if (typeof val === "string") return val;
                 if (!val) return "";
@@ -328,7 +313,20 @@ def index() -> HTMLResponse:
                     if (typeof val.title === "string") return val.title;
                     if (typeof val.raw === "string") return val.raw;
                 }
-                return String(val);
+                return "";
+            }
+
+            function getMessageSourceUrl(metadata) {
+                if (!metadata) return null;
+                const direct = normalizeLinkValue(metadata.url);
+                if (direct) return direct;
+                if (Array.isArray(metadata.urls) && metadata.urls.length) {
+                    const candidate = normalizeLinkValue(metadata.urls[0]);
+                    if (candidate) return candidate;
+                }
+                if (typeof metadata.link === "string") return metadata.link;
+                if (typeof metadata.href === "string") return metadata.href;
+                return null;
             }
 
             function showToast(message, type = "info", options = {}) {
@@ -336,6 +334,7 @@ def index() -> HTMLResponse:
                 const toast = document.createElement("div");
                 toast.className = `toast toast-${type}`;
                 toast.textContent = message || "";
+                toast.addEventListener("click", () => toast.remove());
                 if (options.actionText && typeof options.onAction === "function") {
                     const action = document.createElement("button");
                     action.className = "toast-action";
@@ -349,10 +348,12 @@ def index() -> HTMLResponse:
                 toastContainer.appendChild(toast);
                 requestAnimationFrame(() => toast.classList.add("show"));
                 const ttl = options.duration ?? 4300;
-                setTimeout(() => {
-                    toast.classList.remove("show");
-                    setTimeout(() => toast.remove(), 240);
-                }, ttl);
+                if (ttl !== null && ttl !== undefined) {
+                    setTimeout(() => {
+                        toast.classList.remove("show");
+                        setTimeout(() => toast.remove(), 240);
+                    }, ttl);
+                }
             }
 
             let statusHideTimer = null;
@@ -361,38 +362,35 @@ def index() -> HTMLResponse:
                     clearTimeout(statusHideTimer);
                     statusHideTimer = null;
                 }
-                if (statusBanner) statusBanner.classList.remove("show", "status-info", "status-error", "status-success");
-                if (statusText) statusText.textContent = "";
             }
 
             function setStatus(message, type = "info", options = {}) {
-                if (!statusBanner || !statusText) return;
-                if (statusHideTimer) {
-                    clearTimeout(statusHideTimer);
-                    statusHideTimer = null;
-                }
-                statusBanner.className = `status-banner show status-${type}`;
-                statusText.textContent = message || "";
-                const ttl = options.ttl === undefined ? (type === "error" ? null : 4200) : options.ttl;
-                if (ttl) {
-                    statusHideTimer = setTimeout(() => clearStatus(), ttl);
+                clearStatus();
+                const duration = options.duration ?? options.ttl ?? (type === "error" ? 5400 : 3600);
+                showToast(message || "", type, {
+                    duration: duration === null ? null : duration,
+                    actionText: options.actionText,
+                    onAction: options.onAction,
+                });
+                if (duration && duration !== null) {
+                    statusHideTimer = setTimeout(() => {
+                        statusHideTimer = null;
+                    }, duration);
                 }
             }
 
             function surfaceError(message, options = {}) {
-                const msg = message || "Something went wrong — please retry.";
-                setStatus(msg, "error", { ttl: options.ttl ?? 9000 });
-                if (options.toast !== false) {
-                    showToast(msg, "error", {
-                        duration: options.duration ?? 5200,
-                        actionText: options.actionText,
-                        onAction: options.onAction,
-                    });
+                if (options.toast === false) {
+                    clearStatus();
+                    return;
                 }
-            }
-
-            if (statusClose) {
-                statusClose.addEventListener("click", clearStatus);
+                const msg = message || "Something went wrong — please retry.";
+                setStatus(msg, "error", {
+                    ttl: options.ttl ?? 9000,
+                    duration: options.duration,
+                    actionText: options.actionText,
+                    onAction: options.onAction,
+                });
             }
 
             async function fetchJson(url, options = {}) {
@@ -437,18 +435,21 @@ def index() -> HTMLResponse:
             
             // Helper to resolve relative GitHub URLs
             function resolveGitHubUrl(imageUrl, sourceUrl) {
-                if (!imageUrl || !sourceUrl) return imageUrl;
+                const safeImageUrl = normalizeLinkValue(imageUrl);
+                const safeSourceUrl = normalizeLinkValue(sourceUrl);
+                if (!safeImageUrl && !safeSourceUrl) return "";
+                if (!safeImageUrl) return "";
                 // If already absolute, return as-is
-                if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) {
-                    return imageUrl;
+                if (safeImageUrl && (safeImageUrl.startsWith('http://') || safeImageUrl.startsWith('https://'))) {
+                    return safeImageUrl;
                 }
                 // Parse GitHub URL to extract owner, repo, and branch
                 try {
-                    const url = new URL(sourceUrl);
-                    if (!url.hostname.includes('github')) return imageUrl;
+                    const url = new URL(safeSourceUrl);
+                    if (!url.hostname.includes('github')) return safeImageUrl;
                     
                     const pathParts = url.pathname.split('/').filter(p => p);
-                    if (pathParts.length < 2) return imageUrl;
+                    if (pathParts.length < 2) return safeImageUrl;
                     
                     const owner = pathParts[0];
                     const repo = pathParts[1];
@@ -464,7 +465,7 @@ def index() -> HTMLResponse:
                     }
                     
                     // Remove leading ./ or /
-                    let relPath = imageUrl.replace(/^\\\\.?\\\\/?\\/g, '');
+                    let relPath = safeImageUrl.replace(/^[./]+/, '');
                     
                     // Construct full path
                     const fullPath = basePath ? `${basePath}/${relPath}` : relPath;
@@ -473,7 +474,7 @@ def index() -> HTMLResponse:
                     return `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${fullPath}`;
                 } catch (e) {
                     console.warn('Failed to resolve GitHub URL:', e);
-                    return imageUrl;
+                    return safeImageUrl;
                 }
             }
             
@@ -481,9 +482,11 @@ def index() -> HTMLResponse:
             let currentMessageUrl = null;
             
             renderer.image = (href, title, text) => {
-                const resolvedHref = currentMessageUrl ? resolveGitHubUrl(href, currentMessageUrl) : href;
+                const baseHref = normalizeLinkValue(href);
+                const resolvedHref = currentMessageUrl ? resolveGitHubUrl(baseHref, currentMessageUrl) : baseHref;
                 const t = title ? ` title="${title}"` : "";
                 const alt = text || "";
+                if (!resolvedHref) return alt ? `<span>${alt}</span>` : "";
                 return `<img src="${resolvedHref}" alt="${alt}"${t} />`;
             };
             
@@ -1061,7 +1064,7 @@ def index() -> HTMLResponse:
                 const bubble = document.createElement('div');
                 bubble.className = 'bubble';
                 // Set context for image URL resolution
-                currentMessageUrl = metadata?.url || null;
+                currentMessageUrl = getMessageSourceUrl(metadata);
                 bubble.innerHTML = marked.parse(content || '');
                 currentMessageUrl = null; // Reset after parsing
                 const actions = document.createElement('div');
@@ -1220,7 +1223,7 @@ def index() -> HTMLResponse:
                 const body = document.createElement('div');
                 body.className = 'history-body';
                 // Set context for image URL resolution
-                currentMessageUrl = m.metadata?.url || null;
+                currentMessageUrl = getMessageSourceUrl(m.metadata);
                 body.innerHTML = marked.parse(m.content || '');
                 currentMessageUrl = null; // Reset after parsing
                 const actions = document.createElement('div');
