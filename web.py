@@ -2,7 +2,7 @@ from typing import List
 from pathlib import Path
 import secrets
 
-from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, UploadFile, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from datetime import UTC, datetime
@@ -154,8 +154,8 @@ def index() -> HTMLResponse:
             .note-item .title { font-weight: 600; margin-bottom: 4px; white-space: nowrap; overflow: hidden; }
             .note-item .meta { font-size: 12px; color: var(--subtle); }
             .note-editor-body { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
-            #note-input { width: 100%; height: 100%; border: none; outline: none; padding: 16px; padding-bottom: 140px; font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace; font-size: 14px; resize: none; background: #fdfdff; color: var(--ink); border-bottom-left-radius: 12px; border-bottom-right-radius: 12px; box-sizing: border-box; overflow: auto; scroll-padding-bottom: 140px; }
-            #note-preview { padding: 16px; overflow-y: auto; flex: 1; background: linear-gradient(180deg, #fff, #f7f9ff); }
+            #note-input { width: 100%; height: 100%; border: none; outline: none; padding: 16px; padding-bottom: 140px; font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace; font-size: 14px; line-height: 1.35; resize: none; background: #fdfdff; color: var(--ink); border-bottom-left-radius: 12px; border-bottom-right-radius: 12px; box-sizing: border-box; overflow: auto; scroll-padding-bottom: 140px; }
+            #note-preview { padding: 16px; overflow-y: auto; flex: 1; background: linear-gradient(180deg, #fff, #f7f9ff); line-height: 1.35; }
             #note-preview h1, #note-preview h2, #note-preview h3 { margin-top: 0; }
             #note-preview img { max-width: 100%; border-radius: 10px; border: 1px solid var(--border); }
             .note-title { font-weight: 600; color: var(--ink); }
@@ -175,7 +175,7 @@ def index() -> HTMLResponse:
             <div><strong>Shiye</strong> — Your personal knowledge base</div>
             <div class="row">
                 <label style="display:flex;align-items:center;gap:6px;color:#4b5563;font-size:12px;">
-                    <input type="checkbox" id="debugToggle" onclick="toggleDebug()" />
+                    <input type="checkbox" id="debugToggle" onclick="toggleDebug()" checked />
                     debug
                 </label>
                 <button id="noteBackBtn" type="button" class="ghost note-exit" onclick="exitNoteMode()">Back to chat</button>
@@ -225,6 +225,7 @@ def index() -> HTMLResponse:
                         </div>
                         <div class="note-actions">
                             <span id="note-dirty" class="note-pill subtle" style="display:none;">Unsaved</span>
+                            <button type="button" class="ghost" onclick="insertTimestamp()">Insert date/time</button>
                             <button id="saveNoteBtn" type="button" class="ghost" onclick="saveActiveNote()">Save</button>
                         </div>
                     </div>
@@ -271,6 +272,29 @@ def index() -> HTMLResponse:
             const noteDirty = document.getElementById('note-dirty');
             const noteStatus = document.getElementById('noteStatus');
             const mathScript = document.getElementById('mathjax-script');
+            function normalizeLinkValue(val) {
+                if (typeof val === "string") return val;
+                if (!val) return "";
+                if (typeof val === "object") {
+                    if (typeof val.href === "string") return val.href;
+                    if (typeof val.url === "string") return val.url;
+                    if (typeof val.link === "string") return val.link;
+                    if (typeof val.text === "string") return val.text;
+                    if (typeof val.title === "string") return val.title;
+                    if (typeof val.raw === "string") return val.raw;
+                }
+                return String(val);
+            }
+
+            const renderer = new marked.Renderer();
+            renderer.link = (href, title, text) => {
+                const t = title ? ` title="${title}"` : "";
+                const safeHref = normalizeLinkValue(href) || "#";
+                const rawLabel = normalizeLinkValue(text);
+                const label = rawLabel && rawLabel.trim() !== "" ? rawLabel : safeHref;
+                return `<a href="${safeHref}"${t} target="_blank" rel="noopener noreferrer">${label}</a>`;
+            };
+            marked.setOptions({ renderer });
             let mathQueue = [];
             let historyOpen = false;
             let isResizing = false;
@@ -550,6 +574,17 @@ def index() -> HTMLResponse:
                 textarea.selectionStart = textarea.selectionEnd = pos;
             }
 
+            function insertTimestamp() {
+                if (!noteInput) return;
+                const now = new Date();
+                const pad = (v) => String(v).padStart(2, "0");
+                const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+                insertAtCursor(noteInput, `${stamp}\\n`);
+                markNoteDirty(true);
+                renderNotePreview();
+                noteInput.focus();
+            }
+
             function renderMessage(role, content, chunkId, createdAt, debug, metadata) {
                 const wrap = document.createElement('div');
                 wrap.className = 'msg role-' + (role || 'system');
@@ -637,9 +672,11 @@ def index() -> HTMLResponse:
                     renderMessage('system', '[rss] fetching feeds...', null, new Date().toISOString());
                     setSending(true);
                     try {
+                        const debug = !!(debugToggle && debugToggle.checked);
                         const res = await fetch('/api/rss', {
                             method: 'POST',
-                            headers: {'Content-Type': 'application/json'}
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({ debug })
                         });
                         const data = await res.json();
                         (data.messages || []).forEach(m => renderMessage(m.role, m.content, m.chunk_id, m.created_at, m.debug, m.metadata));
@@ -788,6 +825,10 @@ def index() -> HTMLResponse:
             if (mathScript) {
                 mathScript.addEventListener('load', flushMathQueue);
             }
+            if (debugToggle) {
+                debugToggle.checked = true;
+                toggleDebug();
+            }
             renderNotePreview();
             flushMathQueue();
             setSending(false);
@@ -917,7 +958,13 @@ def add(payload=Body(...)) -> dict:
 
 
 @app.post("/api/rss")
-def run_rss() -> dict:
+async def run_rss(request: Request) -> dict:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = None
+    debug = bool((payload or {}).get("debug"))
+    orchestrator.last_llm_trace = None
     feeds = rss.load_feed_urls()
     if not feeds:
         return {"messages": [make_system_msg("[rss] no feeds configured (rss_feeds.txt)")] }
@@ -938,6 +985,9 @@ def run_rss() -> dict:
     keywords = ["AI infra", "LLM", "AI coding", "Agent", "Agentic AI", "machine learning", "attention", "memory"]
     summary = orchestrator.summarize_rss(items, keywords=keywords)
     messages = [msg_to_dict(m) for m in summary]
+    if debug and orchestrator.last_llm_trace:
+        for m in messages:
+            m["debug"] = orchestrator.last_llm_trace
     return {"messages": messages}
 
 

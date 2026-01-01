@@ -72,6 +72,11 @@ Environment variables:
 - `/summarize` - Summarize current conversation context
 - `/clear` - Clear on-screen chat log (doesn't affect storage)
 
+### UI Tips
+
+- Debug traces are enabled by default to surface LLM reasoning; uncheck the header toggle if you want quieter responses.
+- In note mode, use the **Insert date/time** button in the editor panel to drop in a current timestamp.
+
 ### Data Storage
 
 **Location**: Local storage under `~/.shiye/` (configurable)
