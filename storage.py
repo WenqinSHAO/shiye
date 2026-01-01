@@ -9,10 +9,11 @@ from typing import List, Optional, Sequence
 
 import numpy as np
 
-from config import DATA_DIR, DB_PATH
+from config import DATA_DIR, DB_PATH, MODEL_NAME
 from datatypes import Message, Role, ensure_utc
 from embeddings import EmbeddingProvider
 from vector_store import FaissIndex, faiss
+from retrieval import SearchRequest, Candidate, Reranker, RecencyBooster, TypeBooster, ExactMatchBooster, Deduplicator
 
 
 @dataclass
@@ -44,13 +45,16 @@ class LocalStore:
         db_path: Path = DB_PATH,
         data_dir: Path = DATA_DIR,
         embedder: Optional[EmbeddingProvider] = None,
+        reranker: Optional[Reranker] = None,
     ) -> None:
         self.db_path = db_path
         self.data_dir = data_dir
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.embedder = embedder
+        self.reranker = reranker
         self._faiss_index: Optional[FaissIndex] = None
         self._ensure_schema()
+        self._migrate_schema_v2()
         self.default_doc_id = self._ensure_default_document()
         if self.embedder:
             try:
@@ -156,6 +160,76 @@ class LocalStore:
                 )
                 """
             )
+
+    def _migrate_schema_v2(self) -> None:
+        """Apply schema migrations for v0.7 retrieval enhancements.
+        
+        Adds:
+        - char_start, char_end, embedding_model, chunk_window columns to chunks table
+        - chunks_fts FTS5 virtual table for sparse search
+        - Triggers to keep FTS5 table in sync
+        """
+        with self._connect() as conn:
+            cur = conn.cursor()
+            
+            # Check if already migrated by looking for char_start column
+            cursor = cur.execute("PRAGMA table_info(chunks)")
+            columns = [row[1] for row in cursor.fetchall()]
+            
+            if 'char_start' in columns:
+                # Already migrated
+                return
+            
+            # Add new columns to chunks table
+            cur.execute("ALTER TABLE chunks ADD COLUMN char_start INTEGER DEFAULT 0")
+            cur.execute("ALTER TABLE chunks ADD COLUMN char_end INTEGER DEFAULT -1")
+            cur.execute(f"ALTER TABLE chunks ADD COLUMN embedding_model TEXT DEFAULT '{MODEL_NAME}'")
+            cur.execute("ALTER TABLE chunks ADD COLUMN chunk_window TEXT")
+            
+            # Create FTS5 virtual table for sparse search
+            cur.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+                    chunk_id UNINDEXED,
+                    text,
+                    doc_type UNINDEXED,
+                    tokenize='porter unicode61'
+                )
+            """)
+            
+            # Populate FTS5 from existing chunks
+            cur.execute("""
+                INSERT INTO chunks_fts(chunk_id, text, doc_type)
+                SELECT 
+                    c.id, 
+                    c.text, 
+                    d.doc_type
+                FROM chunks c
+                JOIN documents d ON c.document_id = d.id
+                WHERE c.deleted = 0
+            """)
+            
+            # Create trigger to keep FTS5 in sync on INSERT
+            cur.execute("""
+                CREATE TRIGGER IF NOT EXISTS chunks_fts_insert
+                AFTER INSERT ON chunks
+                BEGIN
+                    INSERT INTO chunks_fts(chunk_id, text, doc_type)
+                    SELECT NEW.id, NEW.text, d.doc_type
+                    FROM documents d WHERE d.id = NEW.document_id;
+                END
+            """)
+            
+            # Create trigger to keep FTS5 in sync on DELETE
+            cur.execute("""
+                CREATE TRIGGER IF NOT EXISTS chunks_fts_delete
+                AFTER UPDATE OF deleted ON chunks
+                WHEN NEW.deleted = 1
+                BEGIN
+                    DELETE FROM chunks_fts WHERE chunk_id = NEW.id;
+                END
+            """)
+            
+            print("[info] Schema migration v2 completed successfully")
 
     def _maybe_embed(self, texts: Sequence[str]):
         if self.embedder and self._faiss_index:
@@ -284,8 +358,8 @@ class LocalStore:
                 created_at = ensure_utc(msg.created_at) or datetime.now(UTC)
                 cur.execute(
                     """
-                    INSERT INTO chunks (document_id, seq, text, role, token_count, embedding_id, created_at, event_at, tags, focus_hint)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO chunks (document_id, seq, text, role, token_count, embedding_id, created_at, event_at, tags, focus_hint, char_start, char_end, embedding_model)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         doc_id,
@@ -298,6 +372,9 @@ class LocalStore:
                         ensure_utc(msg.reference_time).isoformat() if msg.reference_time else None,
                         json.dumps(msg.metadata) if msg.metadata else None,
                         msg.metadata.get("focus_hint") if msg.metadata else None,
+                        msg.metadata.get("char_start", 0) if msg.metadata else 0,
+                        msg.metadata.get("char_end", -1) if msg.metadata else -1,
+                        MODEL_NAME,
                     ),
                 )
                 chunk_id = cur.lastrowid
@@ -708,3 +785,227 @@ class LocalStore:
                 self._faiss_index.rebuild([], np.zeros((0, self._faiss_index.dim), dtype="float32"))
             except Exception as e:
                 print(f"[warn] failed to reset FAISS index: {e}")
+
+    def get_chunk(self, chunk_id: int) -> StoredChunk:
+        """Fetch single chunk by ID with all metadata."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM chunks WHERE id = ? AND deleted = 0",
+                (chunk_id,)
+            ).fetchone()
+            if not row:
+                raise ValueError(f"Chunk {chunk_id} not found")
+            return StoredChunk(
+                id=row['id'],
+                document_id=row['document_id'],
+                text=row['text'],
+                role=Role(row['role']) if row['role'] else Role.USER,
+                created_at=ensure_utc(datetime.fromisoformat(row['created_at'])) if row['created_at'] else datetime.now(UTC),
+                reference_time=ensure_utc(datetime.fromisoformat(row['event_at'])) if row['event_at'] else None,
+                embedding_id=row['embedding_id'],
+                tags=json.loads(row['tags']) if row['tags'] else None,
+                focus_hint=row['focus_hint']
+            )
+    
+    def get_document(self, doc_id: int) -> dict:
+        """Fetch document metadata."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM documents WHERE id = ?",
+                (doc_id,)
+            ).fetchone()
+            return dict(row) if row else {}
+    
+    def _dense_retrieval(self, request: SearchRequest) -> List[Candidate]:
+        """FAISS semantic search with metadata post-filtering."""
+        if not self.embedder or not self._faiss_index:
+            return []
+        
+        # 1. Embed query
+        try:
+            query_vec = self.embedder.embed([request.query])[0]
+        except Exception as e:
+            print(f"[warn] dense retrieval embedding failed: {e}")
+            return []
+        
+        # 2. FAISS over-retrieval (top 500 to account for filtering)
+        try:
+            chunk_ids, scores = self._faiss_index.search(query_vec, top_k=500)
+        except Exception as e:
+            print(f"[warn] FAISS search failed: {e}")
+            return []
+        
+        if not chunk_ids:
+            return []
+        
+        # 3. Fetch metadata and apply filters
+        with self._connect() as conn:
+            placeholders = ','.join('?' * len(chunk_ids))
+            sql = f"""
+            SELECT c.id, c.document_id, c.text, c.created_at, c.event_at, d.doc_type
+            FROM chunks c
+            JOIN documents d ON c.document_id = d.id
+            WHERE c.id IN ({placeholders})
+              AND c.deleted = 0
+            """
+            
+            params = list(chunk_ids)
+            
+            # Apply filters
+            if request.filters.get('doc_type'):
+                sql += " AND d.doc_type = ?"
+                params.append(request.filters['doc_type'])
+            
+            if request.filters.get('before'):
+                time_field = request.filters.get('time_field', 'created_at')
+                sql += f" AND c.{time_field} < ?"
+                params.append(request.filters['before'])
+            
+            if request.filters.get('after'):
+                time_field = request.filters.get('time_field', 'created_at')
+                sql += f" AND c.{time_field} > ?"
+                params.append(request.filters['after'])
+            
+            rows = conn.execute(sql, params).fetchall()
+        
+        # 4. Build candidates with original FAISS scores
+        results = []
+        score_map = dict(zip(chunk_ids, scores))
+        for row in rows:
+            results.append(Candidate(
+                chunk_id=row['id'],
+                score=float(score_map[row['id']]),
+                channel='dense',
+                doc_id=row['document_id'],
+                doc_type=row['doc_type'],
+                timestamp=ensure_utc(datetime.fromisoformat(row.get('event_at') or row['created_at'])) if (row.get('event_at') or row['created_at']) else None,
+                text_preview=row['text'][:200] if row['text'] else ""
+            ))
+        
+        return sorted(results, key=lambda x: x.score, reverse=True)[:request.top_k * 2]
+    
+    def _sparse_retrieval(self, request: SearchRequest) -> List[Candidate]:
+        """SQLite FTS5 BM25 search."""
+        with self._connect() as conn:
+            # FTS5 full-text search
+            sql = """
+            SELECT 
+                f.chunk_id,
+                f.text,
+                bm25(f) as score,
+                c.document_id,
+                c.created_at,
+                c.event_at,
+                f.doc_type
+            FROM chunks_fts f
+            JOIN chunks c ON f.chunk_id = c.id
+            WHERE chunks_fts MATCH ?
+              AND c.deleted = 0
+            """
+            
+            params = [request.query]
+            
+            # Apply filters
+            if request.filters.get('doc_type'):
+                sql += " AND f.doc_type = ?"
+                params.append(request.filters['doc_type'])
+            
+            sql += " ORDER BY bm25(f) LIMIT ?"
+            params.append(request.top_k * 2)
+            
+            try:
+                rows = conn.execute(sql, params).fetchall()
+            except Exception as e:
+                print(f"[warn] Sparse retrieval failed: {e}")
+                return []
+        
+        # BM25 scores are negative (lower is better), normalize to positive
+        results = []
+        for row in rows:
+            normalized_score = 1.0 / (1.0 + abs(row['score']))  # convert to 0-1 range
+            results.append(Candidate(
+                chunk_id=row['chunk_id'],
+                score=normalized_score,
+                channel='sparse',
+                doc_id=row['document_id'],
+                doc_type=row['doc_type'],
+                timestamp=ensure_utc(datetime.fromisoformat(row.get('event_at') or row['created_at'])) if (row.get('event_at') or row['created_at']) else None,
+                text_preview=row['text'][:200] if row['text'] else ""
+            ))
+        
+        return results
+    
+    def search_hybrid(self, request: SearchRequest) -> List[List[Candidate]]:
+        """Run multiple retrievers and return channel-separated results."""
+        # Retriever 1: Dense FAISS search
+        dense_candidates = self._dense_retrieval(request)
+        
+        # Retriever 2: Sparse FTS5 search
+        sparse_candidates = self._sparse_retrieval(request)
+        
+        return [dense_candidates, sparse_candidates]
+    
+    def _fuse_rrf(self, retriever_results: List[List[Candidate]], k: int = 60) -> List[Candidate]:
+        """Reciprocal Rank Fusion: combine rankings from multiple retrievers.
+        
+        RRF score = sum over all retrievers of: 1 / (k + rank)
+        where k=60 is standard constant, rank is 1-indexed position.
+        """
+        from collections import defaultdict
+        
+        rrf_scores = defaultdict(float)
+        chunk_map = {}  # chunk_id -> best Candidate object
+        
+        for channel_results in retriever_results:
+            for rank, candidate in enumerate(channel_results, start=1):
+                rrf_scores[candidate.chunk_id] += 1.0 / (k + rank)
+                
+                # Keep candidate with most metadata
+                if candidate.chunk_id not in chunk_map:
+                    chunk_map[candidate.chunk_id] = candidate
+        
+        # Build fused candidates
+        fused = []
+        for chunk_id, rrf_score in sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True):
+            candidate = chunk_map[chunk_id]
+            candidate.score = rrf_score
+            candidate.channel = 'fused'
+            fused.append(candidate)
+        
+        return fused
+    
+    def search(self, request: SearchRequest) -> List[Candidate]:
+        """Full search pipeline with hybrid retrieval, fusion, rerank, and post-processing."""
+        
+        # Stage B: Multi-retrieval
+        retriever_results = self.search_hybrid(request)
+        
+        # Stage C: Fusion
+        fused = self._fuse_rrf(retriever_results)
+        
+        if not fused:
+            return []
+        
+        # Stage D: Reranking
+        if request.enable_rerank and self.reranker:
+            try:
+                fused = self.reranker.rerank(request.query, fused, self)
+            except Exception as e:
+                print(f"[warn] Reranking failed: {e}")
+        
+        # Stage E: Post-processing
+        post_processors = [
+            RecencyBooster(),
+            TypeBooster(),
+            ExactMatchBooster(),
+            Deduplicator(mode='by_doc')
+        ]
+        
+        result = fused
+        for processor in post_processors:
+            try:
+                result = processor.process(request, result)
+            except Exception as e:
+                print(f"[warn] Post-processor {processor.__class__.__name__} failed: {e}")
+        
+        return result[:request.top_k]

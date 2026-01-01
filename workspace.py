@@ -1,10 +1,12 @@
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import List, Optional
+import json
 
 from datatypes import Message, ensure_utc
 from embeddings import EmbeddingProvider
 from storage import LocalStore, NoteConflictError
+from retrieval import SearchRequest, SearchHit
 
 
 @dataclass
@@ -184,4 +186,43 @@ class MemoryWorkspace:
             if note["id"] == note_id:
                 return note
         return None
+
+    def search(self, request: SearchRequest) -> List[SearchHit]:
+        """Enhanced semantic search with hybrid retrieval."""
+        if not self.store:
+            return []
+        
+        candidates = self.store.search(request)
+        
+        # Convert Candidate → SearchHit with full metadata
+        hits = []
+        for rank, candidate in enumerate(candidates, start=1):
+            try:
+                chunk = self.store.get_chunk(candidate.chunk_id)
+                doc = self.store.get_document(candidate.doc_id)
+                
+                hit = SearchHit(
+                    chunk_id=chunk.id,
+                    doc_id=doc.get('id', candidate.doc_id),
+                    doc_type=doc.get('doc_type', candidate.doc_type or 'unknown'),
+                    doc_title=doc.get('title'),
+                    doc_source=doc.get('uri') or doc.get('source'),
+                    text=chunk.text,
+                    char_start=0,  # Will be populated from chunk metadata once available
+                    char_end=-1,
+                    chunk_window=None,
+                    created_at=chunk.created_at,
+                    event_at=chunk.reference_time,
+                    ingested_at=ensure_utc(datetime.fromisoformat(doc.get('ingested_at'))) if doc.get('ingested_at') else None,
+                    scores={'final': candidate.score},
+                    rank=rank,
+                    tags=chunk.tags if isinstance(chunk.tags, list) else (list(chunk.tags.keys()) if isinstance(chunk.tags, dict) else []),
+                    focus_hint=chunk.focus_hint
+                )
+                hits.append(hit)
+            except Exception as e:
+                print(f"[warn] Failed to convert candidate {candidate.chunk_id} to SearchHit: {e}")
+                continue
+        
+        return hits
   
