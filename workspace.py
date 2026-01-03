@@ -7,6 +7,7 @@ from datatypes import Message, ensure_utc
 from embeddings import EmbeddingProvider
 from storage import LocalStore, NoteConflictError
 from retrieval import SearchRequest, SearchHit
+from context_assembly import build_chunk_window
 
 
 @dataclass
@@ -218,7 +219,6 @@ class MemoryWorkspace:
                 # Build chunk_window if not already populated
                 chunk_window = chunk.chunk_window
                 if not chunk_window:
-                    from context_assembly import build_chunk_window
                     chunk_window = build_chunk_window(self.store, chunk.id, window_size=1)
                 
                 hit = SearchHit(
