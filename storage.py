@@ -1237,13 +1237,13 @@ class LocalStore:
                 embedding_id=row['embedding_id'],
                 tags=json.loads(row['tags']) if row['tags'] else None,
                 focus_hint=row['focus_hint'],
-                char_start=row.get('char_start', 0),
-                char_end=row.get('char_end', -1),
-                embedding_model=row.get('embedding_model', None),
-                chunk_window=row.get('chunk_window', None),
-                heading_path=row.get('heading_path', None),
-                page_number=row.get('page_number', None),
-                parent_doc_seq=row.get('parent_doc_seq', None)
+                char_start=row['char_start'] if 'char_start' in row.keys() else 0,
+                char_end=row['char_end'] if 'char_end' in row.keys() else -1,
+                embedding_model=row['embedding_model'] if 'embedding_model' in row.keys() else None,
+                chunk_window=row['chunk_window'] if 'chunk_window' in row.keys() else None,
+                heading_path=row['heading_path'] if 'heading_path' in row.keys() else None,
+                page_number=row['page_number'] if 'page_number' in row.keys() else None,
+                parent_doc_seq=row['parent_doc_seq'] if 'parent_doc_seq' in row.keys() else None
             )
     
     def get_document(self, doc_id: int) -> dict:
