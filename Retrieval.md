@@ -22,31 +22,47 @@ Status: v0.7 hybrid retrieval is shipped; focus now shifts to chunking quality a
 
 ## Current Gaps
 
-- `chunk_window` is unused; chunking is not standardized or token-aware for the MiniLM default.
+- `chunk_window` is populated during ingestion but not yet used in retrieval UI display.
 - Chat flow still calls the older recall path; `ContextPacker` and the new search pipeline are not in the LLM orchestration loop.
 - No golden-query evaluation harness for regression.
 - UI notice for missing FTS5 is still absent (only logs).
 
-## Active Plan: Chunking & Context (v0.8 target)
+## Completed: Chunking & Context for v0.8 ✅
 
-**Status**: In Progress - Core infrastructure complete
+**Status**: Production-ready for notes and chat
 
-**Completed (v0.8)**
-- ✅ Pluggable chunker abstraction with fixed-token, header-aware, and sentence-window strategies
-- ✅ Token-aware measurement using embedding model tokenizer
-- ✅ Context assembly module with neighbor expansion and provenance tracking
-- ✅ Schema migration v3: heading_path, page_number, parent_doc_seq columns added
-- ✅ UI enhancements: chunk metadata display in search results
-- ✅ Comprehensive tests (19 tests passing)
-- ✅ Documentation: CHUNKING_GUIDE.md created
+**What's Working**
+- ✅ **Ingestion**: Notes use header-aware chunking (>200 chars with headers), chat uses per-message with cumulative offsets
+- ✅ **Storage**: chunk_strategy, chunk_version, heading_path, page_number, parent_doc_seq populated
+- ✅ **Retrieval**: get_note() reconstructs full content from all chunks
+- ✅ **FAISS**: Proper cleanup on note updates (no stale embeddings)
+- ✅ **UI**: Search results show chunk location badges
+- ✅ **Tests**: 27 tests covering all chunking strategies and end-to-end workflows
+- ✅ **Chunkers**: FixedTokenChunker, HeaderAwareChunker, SentenceWindowChunker, MessageChunker
+- ✅ **Context assembly**: expand_chunks_with_neighbors(), build_chunk_window(), get_chunk_provenance()
 
-**Remaining Work**
-- [ ] Wire ingestion paths to use chunkers
-- [ ] Update ContextPacker for neighbor expansion
-- [ ] Add integration tests
-- [ ] Migration strategy for existing chunks
+**Design**
+- Minimal overlap (0-30 tokens) during chunking
+- Neighbor expansion deferred to retrieval time (efficient index, coherent context)
+- Per-message chat (simpler than turn windows, works well)
+- Character heuristic (chars/4 ≈ tokens) enables offline operation
 
-See CHUNKING_GUIDE.md for detailed strategies per document type.
+See CHUNKING_GUIDE.md for detailed strategies and PR_REVIEW_RESPONSE.md, SECOND_REVIEW_RESPONSE.md, THIRD_REVIEW_RESPONSE.md for implementation details.
+
+## Next: Retrieval Pipeline Integration
+
+**Goals**
+- Wire context_assembly helpers into retrieval/UI path
+- Surface chunk metadata (heading_path, page, seq) in search results
+- Enable neighbor expansion in ContextPacker for richer LLM context
+
+**Tasks**
+- [ ] Update ContextPacker to use expand_chunks_with_neighbors() for adjacent chunk context
+- [ ] Populate chunk_window during search result assembly (via build_chunk_window)
+- [ ] Update SearchHit display to show chunk windows and location info
+- [ ] Ensure metadata flows: storage → workspace.search() → UI
+- [ ] Add tests for neighbor expansion in retrieval pipeline
+- [ ] Wire new search pipeline into chat orchestrator (replace recall)
 
 ## Retrieval Flow (current)
 

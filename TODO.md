@@ -8,30 +8,39 @@
 - Tests cover retrieval and storage, but golden-query evaluation is still missing.
 - Orchestrator chat flow still uses the older recall path rather than the new search + ContextPacker.
 
-## Active Work: Chunking & Context (target v0.8)
+## Completed: Chunking & Context for v0.8 ✅
 
-**Status**: In Progress - Core infrastructure complete, integration ongoing
+**Status**: Complete - Production-ready for notes and chat
 
-**Completed**
-- [x] Pluggable chunker abstraction with FixedTokenChunker, HeaderAwareChunker, SentenceWindowChunker
-- [x] Token-aware measurement with fallback to character approximation
-- [x] Context assembly module with neighbor expansion and provenance tracking
-- [x] Schema migration v3 with heading_path, page_number, parent_doc_seq columns
-- [x] UI updates to display chunk metadata in search results
-- [x] Comprehensive tests for all chunkers (19 tests passing)
-- [x] Documentation: CHUNKING_GUIDE.md created
+**Delivered**
+- [x] Pluggable chunker abstraction: FixedTokenChunker, HeaderAwareChunker, SentenceWindowChunker, MessageChunker
+- [x] Token-aware measurement with character fallback (works without network)
+- [x] Context assembly module: neighbor expansion, provenance tracking, chunk windows
+- [x] Schema migration v3: heading_path, page_number, parent_doc_seq, chunk_strategy, chunk_version
+- [x] **Notes ingestion**: save_note_chunked() with header-aware chunking (>200 chars with headers)
+- [x] **Chat ingestion**: add_messages() with per-message chunking and cumulative offsets
+- [x] **Note retrieval**: get_note() reconstructs full content from multiple chunks
+- [x] **FAISS management**: Proper cleanup of old embeddings on note updates
+- [x] UI: Search results display chunk location badges (heading path, page, sequence)
+- [x] Tests: 27 tests (19 unit + 8 integration), all passing
+- [x] Documentation: CHUNKING_GUIDE.md, implementation summaries, review responses
 
-**Goals**
-- Token-aware chunking sized for `all-MiniLM-L6-v2` (~256 wordpiece tokens).
-- Structure-first splitting for notes/web/papers; stable provenance (heading paths, pages, sequence ids, offsets).
-- Minimal overlap; use neighbor expansion at context-build time to preserve coherence without ballooning the index.
+**Design Decisions**
+- Minimal overlap (0-30 tokens) during chunking; neighbor expansion deferred to retrieval time
+- Per-message chat (not turn windows) - simpler, works well for current use cases
+- Character heuristic (chars/4 ≈ tokens) enables operation without network access
 
-**Remaining Work**
-- [ ] Wire ingestion paths to use chunkers (notes, web pages, papers, chat, RSS)
-- [ ] Update ContextPacker to support neighbor expansion
-- [ ] Add integration tests for chunked retrieval workflow
-- [ ] Migration strategy for existing chunks
-- [ ] Background rechunking job for legacy data
+**Next PR: Retrieval Pipeline Integration**
+- [ ] Populate chunk_window field during retrieval
+- [ ] Wire expand_chunks_with_neighbors() into ContextPacker
+- [ ] Update search UI to show expanded context with chunk windows
+- [ ] Ensure heading_path/page_number/seq flow through SearchHit to UI
+- [ ] Add tests for neighbor expansion in retrieval
+
+**Future Work (Separate PRs)**
+- [ ] Web/paper/RSS ingestion with appropriate chunkers (HeaderAware, SentenceWindow)
+- [ ] Migration tooling: backfill/rechunk command for legacy documents
+- [ ] Optional: MessageChunker turn windows (if retrieval benefits proven)
 ## Near-Term Backlog
 
 - Move orchestrator/chat context to `workspace.search()` + `ContextPacker`, retiring `recall()`.
