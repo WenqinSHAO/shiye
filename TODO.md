@@ -25,10 +25,11 @@
 - Chat policy: only per-message chunks; MessageChunker turn windows unused—decide default vs opt-in and document.
 
 **Next PRs to finish v0.8**
-- ~~Wire `build_chunk_window` to populate `chunk_window` during search~~; ~~pass heading/page/seq through to UI and display~~ (done); wire `ContextPacker` + `expand_chunks_with_neighbors()` into chat context assembly.
-- Add chunk_strategy + appropriate chunkers to web_page/paper/rss ingestion paths; add integration tests per doc type.
+- ~~All retrieval/UI wiring, chunked ingestion, context assembly, and search policy~~ (done in current PR).
 - Provide a migration/backfill command to set strategy/version and re-chunk/re-embed legacy docs.
-- Decide/document chat chunking policy (per-message default vs optional window chunks) and reflect in config/docs.
+- Decide/document chat chunking policy (per-message default vs optional turn windows) and reflect in config/docs.
+- Optional: Refine search policy heuristics based on usage patterns.
+- Optional: Add alignment filter for post-fusion validation of query vs chunk relevance.
 ## Near-Term Backlog
 
 - Move orchestrator/chat context to `workspace.search()` + `ContextPacker`, retiring `recall()`.

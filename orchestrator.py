@@ -70,8 +70,6 @@ class Orchestrator:
             'reuse_last': Reuse cached search context
             'skip': Skip search, use context_block
         """
-        from datetime import timedelta
-        
         # Extract query text
         query_parts = [m.content for m in user_text if m.content]
         if not query_parts:
@@ -80,7 +78,8 @@ class Orchestrator:
         query = " ".join(query_parts).strip()
         
         # Skip search for very short inputs (likely chit-chat or continuation)
-        if len(query) < 10:
+        # Use 5 chars to allow concise queries like "k8s?" or "TLS?"
+        if len(query) < 5:
             return 'skip'
         
         # Check for continuation signals ("continue", "go on", "more", etc.)
@@ -99,10 +98,13 @@ class Orchestrator:
             if elapsed < 10:  # Less than 10 seconds since last search
                 return 'skip'
         
-        # Check query intent - look for lookup/question keywords
+        # Check query intent - look for lookup/question keywords with word boundaries
+        import re
         lookup_keywords = ['what', 'when', 'where', 'who', 'why', 'how', 'find', 'search', 
                           'tell me', 'show me', 'explain', 'describe', 'list']
-        has_lookup_intent = any(keyword in query_lower for keyword in lookup_keywords)
+        # Use word boundary checks to avoid false positives like "whatever" matching "what"
+        has_lookup_intent = any(re.search(r'\b' + re.escape(keyword) + r'\b', query_lower) 
+                               for keyword in lookup_keywords)
         
         # Search if it looks like a lookup query
         if has_lookup_intent:
@@ -177,6 +179,10 @@ class Orchestrator:
                         self.last_search_time = datetime.now(UTC)
                         context_method = "search+packer"
                         estimated_tokens = context_bundle.get('estimated_tokens', 0)
+                    else:
+                        # Clear stale cache when search returns no results
+                        self.last_search_context = None
+                        self.last_search_time = None
                 
                 elif search_policy == 'reuse_last' and self.last_search_context:
                     # Reuse cached search context
