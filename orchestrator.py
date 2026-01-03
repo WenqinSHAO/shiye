@@ -54,6 +54,62 @@ class Orchestrator:
         self.dspy_predictor = dspy.Predict(Reply) if llm_key else None
         self.dspy_chunker = dspy.Predict(TimeChunker) if llm_key else None
         self.last_llm_trace: Optional[dict] = None
+        self.last_search_context = None  # Cache last search context for reuse
+        self.last_search_time = None  # Track when we last searched
+
+
+    def should_search(self, user_text: List[Message], history_count: int = 0) -> str:
+        """Determine whether to search, reuse last context, or skip search.
+        
+        Args:
+            user_text: User messages to analyze
+            history_count: Number of messages in recent history
+            
+        Returns:
+            'search_now': Perform new search
+            'reuse_last': Reuse cached search context
+            'skip': Skip search, use context_block
+        """
+        from datetime import timedelta
+        
+        # Extract query text
+        query_parts = [m.content for m in user_text if m.content]
+        if not query_parts:
+            return 'skip'
+        
+        query = " ".join(query_parts).strip()
+        
+        # Skip search for very short inputs (likely chit-chat or continuation)
+        if len(query) < 10:
+            return 'skip'
+        
+        # Check for continuation signals ("continue", "go on", "more", etc.)
+        continuation_signals = ['continue', 'go on', 'more', 'keep going', 'tell me more', 'and then']
+        query_lower = query.lower()
+        if any(signal in query_lower for signal in continuation_signals):
+            # Reuse last context if available and recent
+            if self.last_search_context and self.last_search_time:
+                elapsed = (datetime.now(UTC) - self.last_search_time).total_seconds()
+                if elapsed < 300:  # Within 5 minutes
+                    return 'reuse_last'
+        
+        # Check for cooldown (don't search on rapid successive turns)
+        if self.last_search_time:
+            elapsed = (datetime.now(UTC) - self.last_search_time).total_seconds()
+            if elapsed < 10:  # Less than 10 seconds since last search
+                return 'skip'
+        
+        # Check query intent - look for lookup/question keywords
+        lookup_keywords = ['what', 'when', 'where', 'who', 'why', 'how', 'find', 'search', 
+                          'tell me', 'show me', 'explain', 'describe', 'list']
+        has_lookup_intent = any(keyword in query_lower for keyword in lookup_keywords)
+        
+        # Search if it looks like a lookup query
+        if has_lookup_intent:
+            return 'search_now'
+        
+        # Default: skip search for chit-chat
+        return 'skip'
 
 
     def timechunker(self, text: str, role_hint: str = "user") -> List[Message]:
@@ -78,39 +134,59 @@ class Orchestrator:
     def basereply(self, instruction: str, user_text: List[Message]) -> List[Message]:
         if self.dspy_predictor:
             try:
-                # Use search-based context assembly instead of context_block
-                from retrieval import SearchRequest, ContextPacker
+                # Determine search policy
+                search_policy = self.should_search(user_text)
                 
-                # Extract query from user messages
-                query_parts = [m.content for m in user_text if m.content]
-                query = " ".join(query_parts)
-                
-                # Search for relevant context (limiting to avoid token overflow)
-                request = SearchRequest(query=query, top_k=10, enable_rerank=True)
-                hits = self.workspace.search(request)
-                
-                # Pack hits into token-limited context using ContextPacker
-                packer = ContextPacker(max_tokens=6000)  # Leave room for instruction + question
-                context_bundle = packer.pack(hits, query)
-                
-                # Convert packed context back to Message format for DSPy
                 ctx = []
-                for item in context_bundle.get('context_items', []):
-                    # Include citation info in metadata with safe key access
-                    ctx.append(Message(
-                        content=item.get('text', ''),
-                        role=Role.SYSTEM,
-                        metadata={
-                            'citation_id': item.get('citation_id'),
-                            'doc_type': item.get('doc_type'),
-                            'source': item.get('source'),
-                            'relevance_score': item.get('relevance_score', 0.0)
-                        }
-                    ))
+                context_method = "context_block"
+                estimated_tokens = None
                 
-                # Fallback to context_block if search returns nothing
+                if search_policy == 'search_now':
+                    # Use search-based context assembly
+                    from retrieval import SearchRequest, ContextPacker
+                    
+                    # Extract query from user messages
+                    query_parts = [m.content for m in user_text if m.content]
+                    query = " ".join(query_parts)
+                    
+                    # Search for relevant context (limiting to avoid token overflow)
+                    request = SearchRequest(query=query, top_k=10, enable_rerank=True)
+                    hits = self.workspace.search(request)
+                    
+                    if hits:
+                        # Pack hits into token-limited context using ContextPacker
+                        packer = ContextPacker(max_tokens=6000)  # Leave room for instruction + question
+                        context_bundle = packer.pack(hits, query)
+                        
+                        # Convert packed context back to Message format for DSPy
+                        for item in context_bundle.get('context_items', []):
+                            # Include citation info in metadata with safe key access
+                            ctx.append(Message(
+                                content=item.get('text', ''),
+                                role=Role.SYSTEM,
+                                metadata={
+                                    'citation_id': item.get('citation_id'),
+                                    'doc_type': item.get('doc_type'),
+                                    'source': item.get('source'),
+                                    'relevance_score': item.get('relevance_score', 0.0)
+                                }
+                            ))
+                        
+                        # Cache context for potential reuse
+                        self.last_search_context = ctx
+                        self.last_search_time = datetime.now(UTC)
+                        context_method = "search+packer"
+                        estimated_tokens = context_bundle.get('estimated_tokens', 0)
+                
+                elif search_policy == 'reuse_last' and self.last_search_context:
+                    # Reuse cached search context
+                    ctx = self.last_search_context
+                    context_method = "reused_search"
+                
+                # Fallback to context_block if no search context available
                 if not ctx:
                     ctx = self.workspace.context_block(n=200)
+                    context_method = "context_block"
                 
                 self.last_llm_trace = {
                     "type": "reply",
@@ -118,9 +194,10 @@ class Orchestrator:
                     "instruction": instruction,
                     "question": [m.to_dict() for m in user_text],
                     "context": [m.to_dict() for m in ctx],
-                    "context_method": "search+packer" if hits else "context_block",
+                    "context_method": context_method,
+                    "search_policy": search_policy,
                     "context_items": len(ctx),
-                    "estimated_tokens": context_bundle.get('estimated_tokens', 0) if hits else None,
+                    "estimated_tokens": estimated_tokens,
                 }
                 out = self.dspy_predictor(
                     instruction= instruction or "You are a concise, independent-minded assistant.",

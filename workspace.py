@@ -131,7 +131,8 @@ class MemoryWorkspace:
         expected_updated_at: Optional[str] = None,
     ) -> Optional[dict]:
         if self.store:
-            return self.store.save_note(content, title=title, note_id=note_id, expected_updated_at=expected_updated_at)
+            # Use chunked notes by default for better retrieval
+            return self.store.save_note_chunked(content, title=title, note_id=note_id, expected_updated_at=expected_updated_at)
         derived_title = (title or "").strip()
         if not derived_title:
             for line in content.splitlines():
