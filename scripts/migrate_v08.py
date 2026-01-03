@@ -244,7 +244,7 @@ def migrate_document(
                 store._write_index_meta(cur, now_iso)
                 
                 if verbose:
-                    print(f"  Added {len(chunk_ids)} embeddings to FAISS and persisted")
+                    print(f"  Added {len(chunk_ids)} embeddings to FAISS")
         
         stats['success'] = True
         if verbose:
