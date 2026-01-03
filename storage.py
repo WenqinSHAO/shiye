@@ -534,7 +534,11 @@ class LocalStore:
         if not messages:
             return ids
         embeddings = self._maybe_embed([m.content for m in messages])
+        
+        # Determine if we're creating a new document or using default chat
         doc_id = self.default_doc_id
+        is_new_document = document_meta is not None
+        
         if document_meta:
             try:
                 # Add chunking strategy for chat documents
@@ -544,18 +548,38 @@ class LocalStore:
                 doc_id = self._insert_document(document_meta)
             except Exception as e:
                 print(f"[warn] failed to insert document, falling back to default: {e}")
+                is_new_document = False
+        
+        # For default chat document, ensure it has chunk_strategy set
+        if not is_new_document:
+            # Update default document with chunk_strategy if not set
+            with self._connect() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT chunk_strategy FROM documents WHERE id = ?", (doc_id,))
+                row = cur.fetchone()
+                if row and row["chunk_strategy"] is None:
+                    cur.execute(
+                        "UPDATE documents SET chunk_strategy = ?, chunk_version = ? WHERE id = ?",
+                        ("per-message", 1, doc_id)
+                    )
+        
         with self._connect() as conn:
             cur = conn.cursor()
             now_iso = datetime.now(UTC).isoformat()
+            
+            # Calculate cumulative char offsets for proper provenance
+            cumulative_offset = 0
             for idx, msg in enumerate(messages):
                 embedding_id = None
                 if embeddings is not None:
                     embedding_id = None  # filled after chunk id known
                 created_at = ensure_utc(msg.created_at) or datetime.now(UTC)
                 
-                # Calculate proper char positions
-                char_start = msg.metadata.get("char_start", 0) if msg.metadata else 0
-                char_end = msg.metadata.get("char_end", len(msg.content)) if msg.metadata else len(msg.content)
+                # Calculate cumulative char positions
+                # Each message starts where the previous one ended (plus a newline separator)
+                char_start = cumulative_offset
+                char_end = char_start + len(msg.content)
+                cumulative_offset = char_end + 1  # +1 for newline separator between messages
                 
                 cur.execute(
                     """
@@ -1070,23 +1094,40 @@ class LocalStore:
             doc_row = cur.fetchone()
             if not doc_row:
                 return None
+            
+            # Get ALL chunks for the note, ordered by sequence
             cur.execute(
                 """
                 SELECT * FROM chunks
                 WHERE document_id = ? AND deleted = 0
                 ORDER BY seq ASC
-                LIMIT 1
                 """,
                 (note_id,),
             )
-            chunk_row = cur.fetchone()
+            chunk_rows = cur.fetchall()
+        
         tags = json.loads(doc_row["tags"]) if doc_row["tags"] else {}
         updated_at = doc_row["event_at"] or doc_row["created_at"]
         images = tags.get("images") or []
+        
+        # Reconstruct full content from all chunks
+        if chunk_rows:
+            # Check if this is a chunked note (multiple chunks or has chunk_strategy)
+            chunk_strategy = doc_row["chunk_strategy"] if "chunk_strategy" in doc_row.keys() else None
+            if len(chunk_rows) > 1 or chunk_strategy == "header-aware":
+                # Reconstruct from multiple chunks by concatenating in order
+                content_parts = [row["text"] for row in chunk_rows]
+                content = "\n\n".join(content_parts)
+            else:
+                # Single chunk - use as-is
+                content = chunk_rows[0]["text"]
+        else:
+            content = ""
+        
         return {
             "id": note_id,
             "title": doc_row["title"] or tags.get("note_title") or "Untitled note",
-            "content": chunk_row["text"] if chunk_row else "",
+            "content": content,
             "created_at": ensure_utc(datetime.fromisoformat(doc_row["created_at"])).isoformat()
             if doc_row["created_at"]
             else None,
