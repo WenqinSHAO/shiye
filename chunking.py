@@ -500,8 +500,8 @@ def get_chunker_for_doctype(doc_type: str, **kwargs) -> Chunker:
     elif doc_type == 'paper':
         return SentenceWindowChunker(**kwargs)
     elif doc_type == 'chat':
-        # Messages are handled specially, don't use this for chat
-        return FixedTokenChunker(**kwargs)
+        # Return MessageChunker for chat conversations
+        return MessageChunker(**kwargs)
     elif doc_type == 'rss_daily_summary':
         # RSS summaries are typically single chunks
         return FixedTokenChunker(chunk_size=2000, overlap_tokens=0, **kwargs)

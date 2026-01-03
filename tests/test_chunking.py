@@ -254,7 +254,7 @@ def test_get_chunker_for_doctype():
     assert isinstance(get_chunker_for_doctype('note'), HeaderAwareChunker)
     assert isinstance(get_chunker_for_doctype('web_page'), HeaderAwareChunker)
     assert isinstance(get_chunker_for_doctype('paper'), SentenceWindowChunker)
-    assert isinstance(get_chunker_for_doctype('chat'), FixedTokenChunker)
+    assert isinstance(get_chunker_for_doctype('chat'), MessageChunker)  # Fixed to return MessageChunker
     assert isinstance(get_chunker_for_doctype('rss_daily_summary'), FixedTokenChunker)
     assert isinstance(get_chunker_for_doctype('unknown'), FixedTokenChunker)
 
