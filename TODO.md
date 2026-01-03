@@ -8,39 +8,27 @@
 - Tests cover retrieval and storage, but golden-query evaluation is still missing.
 - Orchestrator chat flow still uses the older recall path rather than the new search + ContextPacker.
 
-## Completed: Chunking & Context for v0.8 ✅
+## Chunking & Context (v0.8) – Current Status
 
-**Status**: Complete - Production-ready for notes and chat
+**Working now**
+- Pluggable chunkers: FixedToken, HeaderAware, SentenceWindow, Message; token-aware sizing with char fallback.
+- Schema v3: heading_path/page_number/parent_doc_seq on chunks; chunk_strategy/chunk_version on documents.
+- Notes: `save_note_chunked()` header-aware chunking (auto-threshold), cumulative offsets, FAISS cleanup on update; `get_note()` reconstructs full content.
+- Chat: `add_messages()` per-message chunks with cumulative offsets; chunk_strategy set on chat docs (including default chat).
+- Tests: chunking + chunked ingestion suites pass (FAISS-dependent test skips if unavailable).
+- Docs: CHUNKING_GUIDE.md and review response docs summarize design/decisions.
 
-**Delivered**
-- [x] Pluggable chunker abstraction: FixedTokenChunker, HeaderAwareChunker, SentenceWindowChunker, MessageChunker
-- [x] Token-aware measurement with character fallback (works without network)
-- [x] Context assembly module: neighbor expansion, provenance tracking, chunk windows
-- [x] Schema migration v3: heading_path, page_number, parent_doc_seq, chunk_strategy, chunk_version
-- [x] **Notes ingestion**: save_note_chunked() with header-aware chunking (>200 chars with headers)
-- [x] **Chat ingestion**: add_messages() with per-message chunking and cumulative offsets
-- [x] **Note retrieval**: get_note() reconstructs full content from multiple chunks
-- [x] **FAISS management**: Proper cleanup of old embeddings on note updates
-- [x] UI: Search results display chunk location badges (heading path, page, sequence)
-- [x] Tests: 27 tests (19 unit + 8 integration), all passing
-- [x] Documentation: CHUNKING_GUIDE.md, implementation summaries, review responses
+**Gaps to close v0.8**
+- Retrieval/UI wiring: `chunk_window` never populated; `context_assembly`/neighbor expansion not used in search results or chat context; heading/page/seq not surfaced in UI via SearchHit.
+- Ingestion coverage: web_page/paper/rss ingestion not using chunkers yet and don’t set chunk_strategy/chunk_version.
+- Migration: no backfill/rechunk command for legacy documents (pre-strategy/pre-heading metadata).
+- Chat policy: only per-message chunks; MessageChunker turn windows unused—decide default vs opt-in and document.
 
-**Design Decisions**
-- Minimal overlap (0-30 tokens) during chunking; neighbor expansion deferred to retrieval time
-- Per-message chat (not turn windows) - simpler, works well for current use cases
-- Character heuristic (chars/4 ≈ tokens) enables operation without network access
-
-**Next PR: Retrieval Pipeline Integration**
-- [ ] Populate chunk_window field during retrieval
-- [ ] Wire expand_chunks_with_neighbors() into ContextPacker
-- [ ] Update search UI to show expanded context with chunk windows
-- [ ] Ensure heading_path/page_number/seq flow through SearchHit to UI
-- [ ] Add tests for neighbor expansion in retrieval
-
-**Future Work (Separate PRs)**
-- [ ] Web/paper/RSS ingestion with appropriate chunkers (HeaderAware, SentenceWindow)
-- [ ] Migration tooling: backfill/rechunk command for legacy documents
-- [ ] Optional: MessageChunker turn windows (if retrieval benefits proven)
+**Next PRs to finish v0.8**
+- Wire `ContextPacker` + `expand_chunks_with_neighbors()` into retrieval/chat; populate `chunk_window` via `build_chunk_window`; pass heading/page/seq through to UI and display.
+- Add chunk_strategy + appropriate chunkers to web_page/paper/rss ingestion paths; add integration tests per doc type.
+- Provide a migration/backfill command to set strategy/version and re-chunk/re-embed legacy docs.
+- Decide/document chat chunking policy (per-message default vs optional window chunks) and reflect in config/docs.
 ## Near-Term Backlog
 
 - Move orchestrator/chat context to `workspace.search()` + `ContextPacker`, retiring `recall()`.

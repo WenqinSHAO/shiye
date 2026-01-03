@@ -1,6 +1,6 @@
 # Enhanced Retrieval Design for Shiye
 
-Status: v0.7 hybrid retrieval is shipped; focus now shifts to chunking quality and context assembly.
+Status: v0.7 hybrid retrieval is shipped; chunking v0.8 is partly integrated (notes + chat), but retrieval/context wiring and ingestion coverage remain open.
 
 ---
 
@@ -22,51 +22,31 @@ Status: v0.7 hybrid retrieval is shipped; focus now shifts to chunking quality a
 
 ## Current Gaps
 
-- `chunk_window` is populated during ingestion but not yet used in retrieval UI display.
-- Chat flow still calls the older recall path; `ContextPacker` and the new search pipeline are not in the LLM orchestration loop.
-- No golden-query evaluation harness for regression.
-- UI notice for missing FTS5 is still absent (only logs).
+- `chunk_window` never populated; neighbor expansion/helpers not used in retrieval or UI.
+- Chat flow still calls the older recall path; `ContextPacker` is not in LLM orchestration.
+- Ingestion coverage: only notes/chat use chunkers and set `chunk_strategy`/`chunk_version`; web_page/paper/rss paths remain unchunked/unversioned.
+- No golden-query evaluation harness; no UI notice for missing FTS5.
 
-## Completed: Chunking & Context for v0.8 ✅
+## Chunking & Context (v0.8) – Where We Are
 
-**Status**: Production-ready for notes and chat
+**Working**
+- Notes: header-aware chunking (auto threshold), cumulative offsets, FAISS cleanup on updates; `get_note()` rebuilds full content.
+- Chat: per-message chunks with cumulative offsets; chunk_strategy on chat docs (including default chat).
+- Schema/metadata: heading_path, page_number, parent_doc_seq, chunk_strategy, chunk_version present.
+- Chunkers available: FixedToken, HeaderAware, SentenceWindow, Message; token-aware sizing with char fallback.
+- Context helpers exist: expand_chunks_with_neighbors(), build_chunk_window(), provenance utilities.
+- Tests: chunking and chunked ingestion suites pass (FAISS-dependent test skips when unavailable).
 
-**What's Working**
-- ✅ **Ingestion**: Notes use header-aware chunking (>200 chars with headers), chat uses per-message with cumulative offsets
-- ✅ **Storage**: chunk_strategy, chunk_version, heading_path, page_number, parent_doc_seq populated
-- ✅ **Retrieval**: get_note() reconstructs full content from all chunks
-- ✅ **FAISS**: Proper cleanup on note updates (no stale embeddings)
-- ✅ **UI**: Search results show chunk location badges
-- ✅ **Tests**: 27 tests covering all chunking strategies and end-to-end workflows
-- ✅ **Chunkers**: FixedTokenChunker, HeaderAwareChunker, SentenceWindowChunker, MessageChunker
-- ✅ **Context assembly**: expand_chunks_with_neighbors(), build_chunk_window(), get_chunk_provenance()
-
-**Design**
-- Minimal overlap (0-30 tokens) during chunking
-- Neighbor expansion deferred to retrieval time (efficient index, coherent context)
-- Per-message chat (simpler than turn windows, works well)
-- Character heuristic (chars/4 ≈ tokens) enables offline operation
-
-See CHUNKING_GUIDE.md for detailed strategies and PR_REVIEW_RESPONSE.md, SECOND_REVIEW_RESPONSE.md, THIRD_REVIEW_RESPONSE.md for implementation details.
-
-## Next: Retrieval Pipeline Integration
-
-**Goals**
-- Wire context_assembly helpers into retrieval/UI path
-- Surface chunk metadata (heading_path, page, seq) in search results
-- Enable neighbor expansion in ContextPacker for richer LLM context
-
-**Tasks**
-- [ ] Update ContextPacker to use expand_chunks_with_neighbors() for adjacent chunk context
-- [ ] Populate chunk_window during search result assembly (via build_chunk_window)
-- [ ] Update SearchHit display to show chunk windows and location info
-- [ ] Ensure metadata flows: storage → workspace.search() → UI
-- [ ] Add tests for neighbor expansion in retrieval pipeline
-- [ ] Wire new search pipeline into chat orchestrator (replace recall)
+**Still to do for v0.8**
+- Populate `chunk_window` during retrieval and surface heading/page/seq in SearchHit/UI.
+- Integrate neighbor expansion/ContextPacker into search and chat context assembly.
+- Apply chunkers + chunk_strategy/version to web_page/paper/rss ingestion, with integration tests.
+- Provide migration/backfill tooling to re-chunk/re-embed legacy docs and fill strategy/heading metadata.
+- Decide and document chat chunking policy (per-message default vs optional turn windows).
 
 ## Retrieval Flow (current)
 
-Query → Parse filters → Dense + Sparse retrieval → RRF fusion → Optional rerank → Post-process (recency/type/exact/dedup) → `SearchHit` → (optional) `ContextPacker` for LLM budget
+Query → Parse filters → Dense + Sparse retrieval → RRF fusion → Optional rerank → Post-process (recency/type/exact/dedup) → `SearchHit` → (future) neighbor expansion + `ContextPacker` for LLM budget
 
 ## Debugging & Testing
 
