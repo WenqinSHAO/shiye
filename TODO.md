@@ -19,7 +19,7 @@
 - Docs: CHUNKING_GUIDE.md and review response docs summarize design/decisions.
 
 **Gaps to close v0.8**
-- Retrieval/UI wiring: ~~`chunk_window` now populated via `build_chunk_window()` during search~~; ~~heading/page/seq now surfaced in UI via SearchHit~~; `context_assembly`/neighbor expansion available but not yet used in chat context assembly.
+- ~~Retrieval/UI wiring: `chunk_window` now populated via `build_chunk_window()` during search; heading/page/seq now surfaced in UI via SearchHit; ContextPacker wired into chat flow using search-based context~~.
 - Ingestion coverage: web_page/paper/rss ingestion not using chunkers yet and don’t set chunk_strategy/chunk_version.
 - Migration: no backfill/rechunk command for legacy documents (pre-strategy/pre-heading metadata).
 - Chat policy: only per-message chunks; MessageChunker turn windows unused—decide default vs opt-in and document.

@@ -78,18 +78,54 @@ class Orchestrator:
     def basereply(self, instruction: str, user_text: List[Message]) -> List[Message]:
         if self.dspy_predictor:
             try:
-                ctx = self.workspace.context_block(n=200)
+                # Use search-based context assembly instead of context_block
+                from retrieval import SearchRequest, ContextPacker
+                
+                # Extract query from user messages
+                query_parts = [m.content for m in user_text if m.content]
+                query = " ".join(query_parts)
+                
+                # Search for relevant context (limiting to avoid token overflow)
+                request = SearchRequest(query=query, top_k=10, enable_rerank=True)
+                hits = self.workspace.search(request)
+                
+                # Pack hits into token-limited context using ContextPacker
+                packer = ContextPacker(max_tokens=6000)  # Leave room for instruction + question
+                context_bundle = packer.pack(hits, query)
+                
+                # Convert packed context back to Message format for DSPy
+                ctx = []
+                for item in context_bundle['context_items']:
+                    # Include citation info in metadata
+                    ctx.append(Message(
+                        content=item['text'],
+                        role=Role.SYSTEM,
+                        metadata={
+                            'citation_id': item['citation_id'],
+                            'doc_type': item['doc_type'],
+                            'source': item['source'],
+                            'relevance_score': item['relevance_score']
+                        }
+                    ))
+                
+                # Fallback to context_block if search returns nothing
+                if not ctx:
+                    ctx = self.workspace.context_block(n=200)
+                
                 self.last_llm_trace = {
                     "type": "reply",
                     "ts": datetime.now(UTC).isoformat(),
                     "instruction": instruction,
                     "question": [m.to_dict() for m in user_text],
                     "context": [m.to_dict() for m in ctx],
+                    "context_method": "search+packer" if hits else "context_block",
+                    "context_items": len(ctx),
+                    "estimated_tokens": context_bundle.get('estimated_tokens', 0) if hits else None,
                 }
                 out = self.dspy_predictor(
                     instruction= instruction or "You are a concise, independent-minded assistant.",
                     question=user_text,
-                    context=self.workspace.context_block(n=200))
+                    context=ctx)
                 now = ensure_utc(datetime.now(UTC))
                 for m in out.response:
                     m.created_at = now
@@ -178,15 +214,28 @@ class Orchestrator:
                     context=[Message(content=joined, role=Role.USER)],
                 )
                 for m in out.response:
-                    self.workspace.add_with_document(
-                        [m],
-                        document_meta={
-                            "doc_type": "rss_daily_summary",
-                            "title": "RSS daily brief",
-                            "source": "rss",
-                            "tags": {"keywords": keywords, "count": len(items)},
-                        },
-                    )
+                    # Use chunked ingestion for RSS summaries
+                    try:
+                        self.workspace.store.add_document_chunked(
+                            content=m.content,
+                            document_meta={
+                                "doc_type": "rss_daily_summary",
+                                "title": "RSS daily brief",
+                                "source": "rss",
+                                "tags": {"keywords": keywords, "count": len(items)},
+                            }
+                        )
+                    except Exception as e:
+                        print(f"[warn] Chunked RSS ingestion failed, falling back: {e}")
+                        self.workspace.add_with_document(
+                            [m],
+                            document_meta={
+                                "doc_type": "rss_daily_summary",
+                                "title": "RSS daily brief",
+                                "source": "rss",
+                                "tags": {"keywords": keywords, "count": len(items)},
+                            },
+                        )
                 return out.response
             except Exception as e:
                 return [Message(content=f"[local] RSS summary error: {e}", role=Role.ASSISTANT)]
@@ -199,13 +248,26 @@ class Orchestrator:
             bullet_lines.append(f"- [{i}] {title} ({feed}) {url}")
         bullet_lines.append(f"\nKeywords: {', '.join(keywords)}")
         msg = Message(content="\n".join(bullet_lines), role=Role.ASSISTANT)
-        self.workspace.add_with_document(
-            [msg],
-            document_meta={
-                "doc_type": "rss_daily_summary",
-                "title": "RSS daily brief",
-                "source": "rss",
-                "tags": {"keywords": keywords, "count": len(items)},
-            },
-        )
+        # Use chunked ingestion for RSS summaries (fallback case)
+        try:
+            self.workspace.store.add_document_chunked(
+                content=msg.content,
+                document_meta={
+                    "doc_type": "rss_daily_summary",
+                    "title": "RSS daily brief",
+                    "source": "rss",
+                    "tags": {"keywords": keywords, "count": len(items)},
+                }
+            )
+        except Exception as e:
+            print(f"[warn] Chunked RSS ingestion failed, falling back: {e}")
+            self.workspace.add_with_document(
+                [msg],
+                document_meta={
+                    "doc_type": "rss_daily_summary",
+                    "title": "RSS daily brief",
+                    "source": "rss",
+                    "tags": {"keywords": keywords, "count": len(items)},
+                },
+            )
         return [msg]

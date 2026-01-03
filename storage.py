@@ -618,6 +618,99 @@ class LocalStore:
                 self._write_index_meta(cur, now_iso)
         return ids
 
+    def add_document_chunked(
+        self, 
+        content: str, 
+        document_meta: dict,
+        chunker_kwargs: Optional[dict] = None
+    ) -> dict:
+        """Add a document with automatic chunking based on document type.
+        
+        Args:
+            content: Document content to chunk
+            document_meta: Document metadata (must include doc_type, title, source, uri)
+            chunker_kwargs: Optional kwargs to pass to the chunker
+            
+        Returns:
+            Dict with document_id and chunk_ids
+        """
+        from chunking import get_chunker_for_doctype
+        
+        doc_type = document_meta.get("doc_type", "web_page")
+        chunker_kwargs = chunker_kwargs or {}
+        chunker = get_chunker_for_doctype(doc_type, **chunker_kwargs)
+        
+        # Chunk the content
+        chunks = chunker.chunk(content)
+        
+        if not chunks:
+            # Fallback to single chunk if chunker returns nothing
+            from chunking import Chunk
+            chunks = [Chunk(text=content, char_start=0, char_end=len(content), seq=0)]
+        
+        # Embed all chunks
+        chunk_texts = [c.text for c in chunks]
+        embeddings = self._maybe_embed(chunk_texts)
+        
+        now_iso = datetime.now(UTC).isoformat()
+        
+        # Add chunk strategy metadata
+        chunk_strategy = "fixed-token"
+        if doc_type == "note":
+            chunk_strategy = "header-aware"
+        elif doc_type == "paper":
+            chunk_strategy = "sentence-window"
+        elif doc_type == "web_page":
+            chunk_strategy = "header-aware"
+        elif doc_type == "rss_daily_summary":
+            chunk_strategy = "fixed-token"
+        
+        document_meta["chunk_strategy"] = chunk_strategy
+        document_meta["chunk_version"] = 1
+        if "created_at" not in document_meta:
+            document_meta["created_at"] = now_iso
+        if "ingested_at" not in document_meta:
+            document_meta["ingested_at"] = now_iso
+        
+        with self._connect() as conn:
+            cur = conn.cursor()
+            
+            # Insert document
+            doc_id = self._insert_document(document_meta)
+            
+            # Insert chunks
+            chunk_ids = []
+            for chunk in chunks:
+                cur.execute(
+                    """
+                    INSERT INTO chunks (document_id, seq, text, role, token_count, embedding_id, 
+                                       created_at, event_at, tags, focus_hint, char_start, char_end, 
+                                       embedding_model, heading_path, page_number, parent_doc_seq)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        doc_id, chunk.seq, chunk.text, Role.SYSTEM.value, chunk.token_count,
+                        None, now_iso, now_iso, json.dumps(document_meta.get("tags", {})), None,
+                        chunk.char_start, chunk.char_end, MODEL_NAME, 
+                        chunk.heading_path, chunk.page_number, chunk.seq
+                    ),
+                )
+                chunk_ids.append(cur.lastrowid)
+            
+            # Add embeddings to FAISS
+            if embeddings is not None and self._faiss_index:
+                for idx, chunk_id in enumerate(chunk_ids):
+                    emb_vec = embeddings[idx:idx+1]
+                    self._faiss_index.add([chunk_id], emb_vec)
+                    cur.execute("UPDATE chunks SET embedding_id = ? WHERE id = ?", (chunk_id, chunk_id))
+                self._write_index_meta(cur, now_iso)
+        
+        return {
+            "document_id": doc_id,
+            "chunk_ids": chunk_ids,
+            "chunk_count": len(chunk_ids),
+        }
+
     def list_recent(self, n: int = 20) -> List[Message]:
         with self._connect() as conn:
             cur = conn.cursor()

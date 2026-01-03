@@ -71,19 +71,42 @@ def handle_add(arg: str, workspace, orchestrator, debug: bool = False) -> List[d
                 role=Role.SYSTEM,
                 metadata={"url": url, "title": title, "source": "url_fetch", "extraction": method},
             )
-            workspace.add_with_document(
-                [msg],
-                document_meta={
-                    "doc_type": "web_page" if method != "arxiv_meta" else "paper",
-                    "title": title,
-                    "source": "url",
-                    "uri": url,
-                    "tags": {"url": url, "note_present": bool(note_text), "extraction": method},
-                },
-            )
-            fetched += 1
-            if debug:
-                logs.append({"text": f"[add] fetched {url} [{method}] ({title})", "debug": {"url": url, "title": title, "method": method}})
+            
+            # Use chunked ingestion for web pages and papers
+            doc_type = "web_page" if method != "arxiv_meta" else "paper"
+            try:
+                result = workspace.store.add_document_chunked(
+                    content=content,
+                    document_meta={
+                        "doc_type": doc_type,
+                        "title": title,
+                        "source": "url",
+                        "uri": url,
+                        "tags": {"url": url, "note_present": bool(note_text), "extraction": method},
+                    }
+                )
+                fetched += 1
+                if debug:
+                    chunk_count = result.get("chunk_count", 0)
+                    logs.append({"text": f"[add] fetched {url} [{method}] ({title}) - {chunk_count} chunks", 
+                                "debug": {"url": url, "title": title, "method": method, "chunks": chunk_count}})
+            except Exception as e:
+                # Fallback to non-chunked if chunking fails
+                print(f"[warn] Chunked ingestion failed for {url}, falling back: {e}")
+                workspace.add_with_document(
+                    [msg],
+                    document_meta={
+                        "doc_type": doc_type,
+                        "title": title,
+                        "source": "url",
+                        "uri": url,
+                        "tags": {"url": url, "note_present": bool(note_text), "extraction": method},
+                    },
+                )
+                fetched += 1
+                if debug:
+                    logs.append({"text": f"[add] fetched {url} [{method}] ({title})", 
+                                "debug": {"url": url, "title": title, "method": method}})
         logs.append({"text": f"[ok] saved note and fetched {fetched}/{len(urls)} URL(s).", "debug": None})
         return logs
 

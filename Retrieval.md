@@ -22,9 +22,9 @@ Status: v0.7 hybrid retrieval is shipped; chunking v0.8 is partly integrated (no
 
 ## Current Gaps
 
-- ~~`chunk_window` now populated during search via `build_chunk_window()`~~; neighbor expansion/helpers exist but not yet used in chat flow.
+- ~~`chunk_window` now populated during search via `build_chunk_window()`; ContextPacker + search-based context now wired into chat flow~~.
 - Chat flow still calls the older recall path; `ContextPacker` is not in LLM orchestration.
-- Ingestion coverage: only notes/chat use chunkers and set `chunk_strategy`/`chunk_version`; web_page/paper/rss paths remain unchunked/unversioned.
+- ~~Ingestion coverage: all document types (notes/chat/web_page/paper/rss) now use chunkers and set `chunk_strategy`/`chunk_version`~~.
 - No golden-query evaluation harness; no UI notice for missing FTS5.
 
 ## Chunking & Context (v0.8) – Where We Are
@@ -36,12 +36,12 @@ Status: v0.7 hybrid retrieval is shipped; chunking v0.8 is partly integrated (no
 - Chunkers available: FixedToken, HeaderAware, SentenceWindow, Message; token-aware sizing with char fallback.
 - Context helpers exist: expand_chunks_with_neighbors(), build_chunk_window(), provenance utilities.
 - Tests: chunking and chunked ingestion suites pass (FAISS-dependent test skips when unavailable).
-- Retrieval: `chunk_window` populated during search; heading/page/seq metadata surfaced in SearchHit and UI.
+- Retrieval: `chunk_window` populated during search; heading/page/seq metadata surfaced in SearchHit and UI; ContextPacker wired into chat for search-based context.
 
 **Still to do for v0.8**
 - ~~Populate `chunk_window` during retrieval and surface heading/page/seq in SearchHit/UI~~ (done).
-- Integrate neighbor expansion/ContextPacker into chat context assembly.
-- Apply chunkers + chunk_strategy/version to web_page/paper/rss ingestion, with integration tests.
+- ~~Integrate ContextPacker into chat context assembly using search-based retrieval~~ (done).
+- ~~Apply chunkers + chunk_strategy/version to web_page/paper/rss ingestion~~ (done, integration tests recommended).
 - Provide migration/backfill tooling to re-chunk/re-embed legacy docs and fill strategy/heading metadata.
 - Decide and document chat chunking policy (per-message default vs optional turn windows).
 
