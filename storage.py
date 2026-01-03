@@ -1240,7 +1240,10 @@ class LocalStore:
                 char_start=row['char_start'] if 'char_start' in row.keys() else 0,
                 char_end=row['char_end'] if 'char_end' in row.keys() else -1,
                 embedding_model=row['embedding_model'] if 'embedding_model' in row.keys() else None,
-                chunk_window=row['chunk_window'] if 'chunk_window' in row.keys() else None
+                chunk_window=row['chunk_window'] if 'chunk_window' in row.keys() else None,
+                heading_path=row['heading_path'] if 'heading_path' in row.keys() else None,
+                page_number=row['page_number'] if 'page_number' in row.keys() else None,
+                parent_doc_seq=row['parent_doc_seq'] if 'parent_doc_seq' in row.keys() else None
             )
     
     def get_document(self, doc_id: int) -> dict:

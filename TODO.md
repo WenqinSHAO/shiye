@@ -19,13 +19,13 @@
 - Docs: CHUNKING_GUIDE.md and review response docs summarize design/decisions.
 
 **Gaps to close v0.8**
-- Retrieval/UI wiring: `chunk_window` never populated; `context_assembly`/neighbor expansion not used in search results or chat context; heading/page/seq not surfaced in UI via SearchHit.
+- Retrieval/UI wiring: ~~`chunk_window` now populated via `build_chunk_window()` during search~~; ~~heading/page/seq now surfaced in UI via SearchHit~~; `context_assembly`/neighbor expansion available but not yet used in chat context assembly.
 - Ingestion coverage: web_page/paper/rss ingestion not using chunkers yet and don’t set chunk_strategy/chunk_version.
 - Migration: no backfill/rechunk command for legacy documents (pre-strategy/pre-heading metadata).
 - Chat policy: only per-message chunks; MessageChunker turn windows unused—decide default vs opt-in and document.
 
 **Next PRs to finish v0.8**
-- Wire `ContextPacker` + `expand_chunks_with_neighbors()` into retrieval/chat; populate `chunk_window` via `build_chunk_window`; pass heading/page/seq through to UI and display.
+- ~~Wire `build_chunk_window` to populate `chunk_window` during search~~; ~~pass heading/page/seq through to UI and display~~ (done); wire `ContextPacker` + `expand_chunks_with_neighbors()` into chat context assembly.
 - Add chunk_strategy + appropriate chunkers to web_page/paper/rss ingestion paths; add integration tests per doc type.
 - Provide a migration/backfill command to set strategy/version and re-chunk/re-embed legacy docs.
 - Decide/document chat chunking policy (per-message default vs optional window chunks) and reflect in config/docs.

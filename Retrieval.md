@@ -22,7 +22,7 @@ Status: v0.7 hybrid retrieval is shipped; chunking v0.8 is partly integrated (no
 
 ## Current Gaps
 
-- `chunk_window` never populated; neighbor expansion/helpers not used in retrieval or UI.
+- ~~`chunk_window` now populated during search via `build_chunk_window()`~~; neighbor expansion/helpers exist but not yet used in chat flow.
 - Chat flow still calls the older recall path; `ContextPacker` is not in LLM orchestration.
 - Ingestion coverage: only notes/chat use chunkers and set `chunk_strategy`/`chunk_version`; web_page/paper/rss paths remain unchunked/unversioned.
 - No golden-query evaluation harness; no UI notice for missing FTS5.
@@ -36,10 +36,11 @@ Status: v0.7 hybrid retrieval is shipped; chunking v0.8 is partly integrated (no
 - Chunkers available: FixedToken, HeaderAware, SentenceWindow, Message; token-aware sizing with char fallback.
 - Context helpers exist: expand_chunks_with_neighbors(), build_chunk_window(), provenance utilities.
 - Tests: chunking and chunked ingestion suites pass (FAISS-dependent test skips when unavailable).
+- Retrieval: `chunk_window` populated during search; heading/page/seq metadata surfaced in SearchHit and UI.
 
 **Still to do for v0.8**
-- Populate `chunk_window` during retrieval and surface heading/page/seq in SearchHit/UI.
-- Integrate neighbor expansion/ContextPacker into search and chat context assembly.
+- ~~Populate `chunk_window` during retrieval and surface heading/page/seq in SearchHit/UI~~ (done).
+- Integrate neighbor expansion/ContextPacker into chat context assembly.
 - Apply chunkers + chunk_strategy/version to web_page/paper/rss ingestion, with integration tests.
 - Provide migration/backfill tooling to re-chunk/re-embed legacy docs and fill strategy/heading metadata.
 - Decide and document chat chunking policy (per-message default vs optional turn windows).
