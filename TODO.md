@@ -10,20 +10,28 @@
 
 ## Active Work: Chunking & Context (target v0.8)
 
+**Status**: In Progress - Core infrastructure complete, integration ongoing
+
+**Completed**
+- [x] Pluggable chunker abstraction with FixedTokenChunker, HeaderAwareChunker, SentenceWindowChunker
+- [x] Token-aware measurement with fallback to character approximation
+- [x] Context assembly module with neighbor expansion and provenance tracking
+- [x] Schema migration v3 with heading_path, page_number, parent_doc_seq columns
+- [x] UI updates to display chunk metadata in search results
+- [x] Comprehensive tests for all chunkers (19 tests passing)
+- [x] Documentation: CHUNKING_GUIDE.md created
+
 **Goals**
 - Token-aware chunking sized for `all-MiniLM-L6-v2` (~256 wordpiece tokens).
 - Structure-first splitting for notes/web/papers; stable provenance (heading paths, pages, sequence ids, offsets).
 - Minimal overlap; use neighbor expansion at context-build time to preserve coherence without ballooning the index.
 
-**Plan**
-- [ ] Introduce a pluggable chunker abstraction (fixed-token, header-aware, sentence-window, optional semantic) returning chunks with offsets + sequence/heading/page metadata.
-- [ ] Define defaults: chunk_size 240–300 tokens, overlap 0–1 sentence (~10–30 tokens) with tokenizer-based measurement, neighbor expansion `seq ±1/2` when assembling context.
-- [ ] Apply per type: chat = per message + optional 3–7 turn windows; note = header-aware then token windows; web_page = heading-aware with boilerplate stripped; paper = sentence grouping (~260 tokens) with page/section markers; rss_daily_summary = single chunk.
-- [ ] Wire ingestion paths to use the chunker and populate `chunk_window`/heading/path metadata; ensure embeddings respect the chosen max length.
-- [ ] Update context building to pull neighbor chunks by `seq`, and keep citations intact.
-- [ ] Add tests for realized chunk size/overlap per doc type and document configuration knobs in docs.
-- [ ] Migration strategy: version chunking configs, detect legacy chunks missing metadata, and offer a background “rechunk + re-embed + reindex” path (scoped by doc type/version) so strategy changes don’t force full rebuilds when unnecessary.
-
+**Remaining Work**
+- [ ] Wire ingestion paths to use chunkers (notes, web pages, papers, chat, RSS)
+- [ ] Update ContextPacker to support neighbor expansion
+- [ ] Add integration tests for chunked retrieval workflow
+- [ ] Migration strategy for existing chunks
+- [ ] Background rechunking job for legacy data
 ## Near-Term Backlog
 
 - Move orchestrator/chat context to `workspace.search()` + `ContextPacker`, retiring `recall()`.

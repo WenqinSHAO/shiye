@@ -29,31 +29,24 @@ Status: v0.7 hybrid retrieval is shipped; focus now shifts to chunking quality a
 
 ## Active Plan: Chunking & Context (v0.8 target)
 
-**Goals**
-- Token-aware chunking that fits `all-MiniLM-L6-v2` (~256 wordpiece tokens).
-- Structure-first splits for notes/web/papers with stable provenance (heading paths, page numbers, sequence ids, offsets).
-- Minimal overlap; rely on neighbor expansion when building context.
-- Keep hybrid retrieval efficient by avoiding near-duplicate embeddings.
+**Status**: In Progress - Core infrastructure complete
 
-**Defaults**
-- `chunk_size`: 240–300 tokens measured by tokenizer.
-- `overlap`: 0–1 sentence or ~10–30 tokens; avoid >15% overlap.
-- Neighbor expansion: fetch `seq ±1` (or ±2 for long-form) when assembling context instead of indexing heavy overlap.
+**Completed (v0.8)**
+- ✅ Pluggable chunker abstraction with fixed-token, header-aware, and sentence-window strategies
+- ✅ Token-aware measurement using embedding model tokenizer
+- ✅ Context assembly module with neighbor expansion and provenance tracking
+- ✅ Schema migration v3: heading_path, page_number, parent_doc_seq columns added
+- ✅ UI enhancements: chunk metadata display in search results
+- ✅ Comprehensive tests (19 tests passing)
+- ✅ Documentation: CHUNKING_GUIDE.md created
 
-**Doc-type strategies**
-- `chat`: chunk per message plus optional 3–7 turn windows for dense search; no token overlap.
-- `note` (markdown): header-aware segmentation, then token windows inside each section; store `heading_path`.
-- `web_page`: heading-aware (HTML/Unstructured by-title fallback), boilerplate stripped; store URL/title/heading path.
-- `paper`: sentence grouping targeting ~260 tokens; keep page/section markers; optional semantic chunking mode for noisy docs.
-- `rss_daily_summary`: typically single chunk; no overlap.
+**Remaining Work**
+- [ ] Wire ingestion paths to use chunkers
+- [ ] Update ContextPacker for neighbor expansion
+- [ ] Add integration tests
+- [ ] Migration strategy for existing chunks
 
-**Implementation tasks**
-- [ ] Introduce a pluggable chunker abstraction (fixed-token, header-aware, sentence-window, optional semantic) that returns chunks with char offsets, sequence/heading/page metadata.
-- [ ] Wire ingestion paths (chat, note, web_page, paper, RSS) to use the chunker and populate `chunk_window`/heading/page metadata where available.
-- [ ] Update context building to support neighbor expansion using `seq` and to keep provenance for citations.
-- [ ] Add tokenizer-based length checks and tests covering chunk size and realized overlap per doc type.
-- [ ] Document configuration knobs (default chunk size, overlap, neighbor expansion) and expose safe defaults.
-- [ ] Migration plan for existing content: version chunking configs, add a background “rechunk + re-embed + reindex” job for old chunks without chunk metadata, and allow partial reruns when defaults change (only reprocess affected doc types/versions).
+See CHUNKING_GUIDE.md for detailed strategies per document type.
 
 ## Retrieval Flow (current)
 
