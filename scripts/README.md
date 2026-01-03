@@ -26,7 +26,7 @@ python scripts/backup_restore.py --data-dir /path/to/data restore /tmp/shiye-bac
 
 Migration script for v0.7 to v0.8 chunking enhancements. This script re-chunks existing documents with the new v0.8 chunkers and properly updates:
 
-- **FAISS index**: Uses correct parameter order (`add(ids, vectors)`) and calls `persist()` to save changes
+- **FAISS index**: Uses correct parameter order (`add(ids, vectors)`) with automatic persistence
 - **Chat documents**: Passes message list to MessageChunker instead of concatenated string (avoids per-character chunking)
 - **Chunk strategy**: Normalizes to `header-aware`, `sentence-window`, `fixed-token`, or `per-message` instead of raw class names
 - **Embedding metadata**: Sets `embedding_id` for all chunks and updates vector index metadata
@@ -35,7 +35,7 @@ Migration script for v0.7 to v0.8 chunking enhancements. This script re-chunks e
 
 ### Key Fixes
 
-1. **FAISS Update**: Corrected from `store._faiss_index.add(np.array(embeddings), np.array(chunk_ids))` to proper `store._faiss_index.add(chunk_ids, embeddings)` with persist
+1. **FAISS Update**: Corrected from `add(embeddings, ids)` to `add(ids, embeddings)` (note: `add()` automatically persists to disk)
 2. **Chat Chunking**: Fixed from passing string `chunker.chunk(content)` to list `chunker.chunk(messages)` for MessageChunker
 3. **Strategy Names**: Changed from raw class names like `HeaderAwareChunker` to normalized names like `header-aware`
 4. **Embedding IDs**: Now properly sets `embedding_id` column and writes index metadata after migration

@@ -17,7 +17,7 @@ import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import numpy as np
 
@@ -53,7 +53,7 @@ def normalize_chunk_strategy(chunker_class_name: str) -> str:
     return strategy
 
 
-def get_document_content(store: LocalStore, doc_id: int, doc_type: str) -> Optional[str | List[str]]:
+def get_document_content(store: LocalStore, doc_id: int, doc_type: str) -> Optional[Union[str, List[str]]]:
     """Retrieve document content for re-chunking.
     
     For chat documents, returns a list of message texts.
