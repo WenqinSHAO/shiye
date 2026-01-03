@@ -63,6 +63,9 @@ class StoredChunk:
     char_end: int = -1
     embedding_model: Optional[str] = None
     chunk_window: Optional[str] = None
+    heading_path: Optional[str] = None  # v0.8 chunking metadata
+    page_number: Optional[int] = None   # v0.8 chunking metadata
+    parent_doc_seq: Optional[int] = None  # v0.8 chunking metadata
 
 
 class NoteConflictError(Exception):
@@ -92,6 +95,7 @@ class LocalStore:
         self._fts5_available: bool = False  # Track FTS5 availability
         self._ensure_schema()
         self._migrate_schema_v2()
+        self._migrate_schema_v3()  # v0.8 chunking enhancements
         self.default_doc_id = self._ensure_default_document()
         if self.embedder:
             try:
@@ -377,6 +381,45 @@ class LocalStore:
             import traceback
             traceback.print_exc()
             print("[WARN] Some features (sparse search) may not be available")
+    
+    def _migrate_schema_v3(self) -> None:
+        """Apply schema migrations for v0.8 chunking enhancements.
+        
+        Adds:
+        - heading_path, page_number, parent_doc_seq columns to chunks table
+        - chunk_strategy, chunk_version columns to documents table
+        """
+        try:
+            with self._connect() as conn:
+                cur = conn.cursor()
+                
+                # Check if chunks columns need to be added
+                cursor = cur.execute("PRAGMA table_info(chunks)")
+                chunk_columns = [row[1] for row in cursor.fetchall()]
+                
+                if 'heading_path' not in chunk_columns:
+                    # Add new chunking metadata columns to chunks table
+                    cur.execute("ALTER TABLE chunks ADD COLUMN heading_path TEXT")
+                    cur.execute("ALTER TABLE chunks ADD COLUMN page_number INTEGER")
+                    cur.execute("ALTER TABLE chunks ADD COLUMN parent_doc_seq INTEGER")
+                    print("[info] Added chunking metadata columns to chunks table")
+                
+                # Check if documents columns need to be added
+                cursor = cur.execute("PRAGMA table_info(documents)")
+                doc_columns = [row[1] for row in cursor.fetchall()]
+                
+                if 'chunk_strategy' not in doc_columns:
+                    # Add chunking config columns to documents table
+                    cur.execute("ALTER TABLE documents ADD COLUMN chunk_strategy TEXT")
+                    cur.execute("ALTER TABLE documents ADD COLUMN chunk_version INTEGER DEFAULT 1")
+                    print("[info] Added chunking config columns to documents table")
+                
+                print("[info] Schema migration v3 completed successfully")
+        except Exception as e:
+            print(f"[ERROR] Schema migration v3 failed: {e}")
+            import traceback
+            traceback.print_exc()
+            print("[WARN] Some chunking features may not be available")
 
     def _maybe_embed(self, texts: Sequence[str]):
         if self.embedder and self._faiss_index:
@@ -807,6 +850,38 @@ class LocalStore:
             "updated_at": now_iso,
             "images": images,
         }
+    
+    def save_note_chunked(
+        self,
+        content: str,
+        title: Optional[str] = None,
+        note_id: Optional[int] = None,
+        expected_updated_at: Optional[str] = None,
+        use_chunking: bool = True,
+    ) -> Optional[dict]:
+        """Save note with optional chunking support.
+        
+        This is the v0.8 enhanced version that supports header-aware chunking.
+        When use_chunking=True, long notes are split into chunks by headers.
+        
+        Args:
+            content: Note content
+            title: Optional title (derived from content if not provided)
+            note_id: Existing note ID for updates
+            expected_updated_at: Expected last update timestamp for conflict detection
+            use_chunking: Whether to use header-aware chunking (default True)
+            
+        Returns:
+            Note dict with metadata
+        """
+        # For now, delegate to old implementation for backward compatibility
+        # TODO: Implement full chunking support for notes
+        # This would involve:
+        # 1. Chunking the note content with HeaderAwareChunker
+        # 2. Storing multiple chunks per note document
+        # 3. Reconstructing full note content when retrieving
+        # 4. Handling updates to chunked notes
+        return self.save_note(content, title, note_id, expected_updated_at)
 
     def list_notes(self, limit: int = 50) -> List[dict]:
         with self._connect() as conn:

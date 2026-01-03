@@ -62,6 +62,11 @@ class SearchHit:
     # Metadata
     tags: List[str]
     focus_hint: Optional[str]
+    
+    # v0.8 chunking metadata
+    heading_path: Optional[str] = None  # e.g., "Introduction > Background"
+    page_number: Optional[int] = None   # For papers/PDFs
+    seq: Optional[int] = None           # Sequence number in document
 
 
 @dataclass
