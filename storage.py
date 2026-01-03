@@ -1239,11 +1239,11 @@ class LocalStore:
                 focus_hint=row['focus_hint'],
                 char_start=row.get('char_start', 0),
                 char_end=row.get('char_end', -1),
-                embedding_model=row.get('embedding_model'),
-                chunk_window=row.get('chunk_window'),
-                heading_path=row.get('heading_path'),
-                page_number=row.get('page_number'),
-                parent_doc_seq=row.get('parent_doc_seq')
+                embedding_model=row.get('embedding_model', None),
+                chunk_window=row.get('chunk_window', None),
+                heading_path=row.get('heading_path', None),
+                page_number=row.get('page_number', None),
+                parent_doc_seq=row.get('parent_doc_seq', None)
             )
     
     def get_document(self, doc_id: int) -> dict:
