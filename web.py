@@ -202,6 +202,8 @@ def index() -> HTMLResponse:
             .search-hit .hit-score { color: var(--subtle); }
             .search-hit .hit-date { margin-left: auto; color: var(--subtle); }
             .search-hit .hit-title { font-weight: 600; margin-bottom: 6px; color: var(--ink); }
+            .search-hit .hit-location { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; font-size: 11px; color: var(--subtle); }
+            .search-hit .hit-location-item { padding: 2px 6px; background: var(--action-bg); border-radius: 4px; border: 1px solid var(--border); }
             .search-hit .hit-text { line-height: 1.5; color: var(--ink); margin-bottom: 6px; }
             .search-hit .hit-source { font-size: 12px; }
             .search-hit .hit-source a { color: var(--accent); text-decoration: none; }
@@ -1904,14 +1906,25 @@ def chat(payload=Body(...)) -> dict:
                     # Format score
                     score = hit.scores.get('final', 0)
                     
+                    # Build location info from chunk metadata
+                    location_parts = []
+                    if hit.heading_path:
+                        location_parts.append(f"<span class='hit-location-item' title='Section'>{hit.heading_path}</span>")
+                    if hit.page_number:
+                        location_parts.append(f"<span class='hit-location-item' title='Page'>p.{hit.page_number}</span>")
+                    if hit.seq is not None:
+                        location_parts.append(f"<span class='hit-location-item' title='Chunk sequence'>chunk #{hit.seq}</span>")
+                    location_html = f"<div class='hit-location'>{' • '.join(location_parts)}</div>" if location_parts else ""
+                    
                     hit_parts = [
-                        f"<div class='search-hit' data-chunk-id='{hit.chunk_id}'>",
+                        f"<div class='search-hit' data-chunk-id='{hit.chunk_id}' data-doc-id='{hit.doc_id}'>",
                         "<div class='hit-header'>",
                         f"<span class='hit-type'>{hit.doc_type}</span>",
                         f"<span class='hit-score'>Score: {score:.3f}</span>",
                         f"<span class='hit-date'>{timestamp_str}</span>",
                         "</div>",
                         f"<div class='hit-title'>{hit.doc_title or 'Untitled'}</div>",
+                        location_html,  # Add location info
                         f"<div class='hit-text'>{preview_text}</div>",
                     ]
                     

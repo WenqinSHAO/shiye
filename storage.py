@@ -63,6 +63,9 @@ class StoredChunk:
     char_end: int = -1
     embedding_model: Optional[str] = None
     chunk_window: Optional[str] = None
+    heading_path: Optional[str] = None  # v0.8 chunking metadata
+    page_number: Optional[int] = None   # v0.8 chunking metadata
+    parent_doc_seq: Optional[int] = None  # v0.8 chunking metadata
 
 
 class NoteConflictError(Exception):
@@ -92,6 +95,7 @@ class LocalStore:
         self._fts5_available: bool = False  # Track FTS5 availability
         self._ensure_schema()
         self._migrate_schema_v2()
+        self._migrate_schema_v3()  # v0.8 chunking enhancements
         self.default_doc_id = self._ensure_default_document()
         if self.embedder:
             try:
@@ -377,6 +381,45 @@ class LocalStore:
             import traceback
             traceback.print_exc()
             print("[WARN] Some features (sparse search) may not be available")
+    
+    def _migrate_schema_v3(self) -> None:
+        """Apply schema migrations for v0.8 chunking enhancements.
+        
+        Adds:
+        - heading_path, page_number, parent_doc_seq columns to chunks table
+        - chunk_strategy, chunk_version columns to documents table
+        """
+        try:
+            with self._connect() as conn:
+                cur = conn.cursor()
+                
+                # Check if chunks columns need to be added
+                cursor = cur.execute("PRAGMA table_info(chunks)")
+                chunk_columns = [row[1] for row in cursor.fetchall()]
+                
+                if 'heading_path' not in chunk_columns:
+                    # Add new chunking metadata columns to chunks table
+                    cur.execute("ALTER TABLE chunks ADD COLUMN heading_path TEXT")
+                    cur.execute("ALTER TABLE chunks ADD COLUMN page_number INTEGER")
+                    cur.execute("ALTER TABLE chunks ADD COLUMN parent_doc_seq INTEGER")
+                    print("[info] Added chunking metadata columns to chunks table")
+                
+                # Check if documents columns need to be added
+                cursor = cur.execute("PRAGMA table_info(documents)")
+                doc_columns = [row[1] for row in cursor.fetchall()]
+                
+                if 'chunk_strategy' not in doc_columns:
+                    # Add chunking config columns to documents table
+                    cur.execute("ALTER TABLE documents ADD COLUMN chunk_strategy TEXT")
+                    cur.execute("ALTER TABLE documents ADD COLUMN chunk_version INTEGER DEFAULT 1")
+                    print("[info] Added chunking config columns to documents table")
+                
+                print("[info] Schema migration v3 completed successfully")
+        except Exception as e:
+            print(f"[ERROR] Schema migration v3 failed: {e}")
+            import traceback
+            traceback.print_exc()
+            print("[WARN] Some chunking features may not be available")
 
     def _maybe_embed(self, texts: Sequence[str]):
         if self.embedder and self._faiss_index:
@@ -465,8 +508,8 @@ class LocalStore:
             cur = conn.cursor()
             cur.execute(
                 """
-                INSERT INTO documents (source, uri, doc_type, created_at, event_at, ingested_at, title, tags, sensitivity, hash, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO documents (source, uri, doc_type, created_at, event_at, ingested_at, title, tags, sensitivity, hash, status, chunk_strategy, chunk_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     doc_meta.get("source"),
@@ -480,6 +523,8 @@ class LocalStore:
                     doc_meta.get("sensitivity"),
                     doc_meta.get("hash"),
                     doc_meta.get("status"),
+                    doc_meta.get("chunk_strategy"),  # v0.8: track chunking strategy
+                    doc_meta.get("chunk_version", 1),  # v0.8: version for migrations
                 ),
             )
             return cur.lastrowid
@@ -489,24 +534,57 @@ class LocalStore:
         if not messages:
             return ids
         embeddings = self._maybe_embed([m.content for m in messages])
+        
+        # Determine if we're creating a new document or using default chat
         doc_id = self.default_doc_id
+        is_new_document = document_meta is not None
+        
         if document_meta:
             try:
+                # Add chunking strategy for chat documents
+                if document_meta.get("doc_type") == "chat" and "chunk_strategy" not in document_meta:
+                    document_meta["chunk_strategy"] = "per-message"
+                    document_meta["chunk_version"] = 1
                 doc_id = self._insert_document(document_meta)
             except Exception as e:
                 print(f"[warn] failed to insert document, falling back to default: {e}")
+                is_new_document = False
+        
+        # For default chat document, ensure it has chunk_strategy set
+        if not is_new_document:
+            # Update default document with chunk_strategy if not set
+            with self._connect() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT chunk_strategy FROM documents WHERE id = ?", (doc_id,))
+                row = cur.fetchone()
+                if row and row["chunk_strategy"] is None:
+                    cur.execute(
+                        "UPDATE documents SET chunk_strategy = ?, chunk_version = ? WHERE id = ?",
+                        ("per-message", 1, doc_id)
+                    )
+        
         with self._connect() as conn:
             cur = conn.cursor()
             now_iso = datetime.now(UTC).isoformat()
+            
+            # Calculate cumulative char offsets for proper provenance
+            cumulative_offset = 0
             for idx, msg in enumerate(messages):
                 embedding_id = None
                 if embeddings is not None:
                     embedding_id = None  # filled after chunk id known
                 created_at = ensure_utc(msg.created_at) or datetime.now(UTC)
+                
+                # Calculate cumulative char positions
+                # Each message starts where the previous one ended (plus a newline separator)
+                char_start = cumulative_offset
+                char_end = char_start + len(msg.content)
+                cumulative_offset = char_end + 1  # +1 for newline separator between messages
+                
                 cur.execute(
                     """
-                    INSERT INTO chunks (document_id, seq, text, role, token_count, embedding_id, created_at, event_at, tags, focus_hint, char_start, char_end, embedding_model)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO chunks (document_id, seq, text, role, token_count, embedding_id, created_at, event_at, tags, focus_hint, char_start, char_end, embedding_model, parent_doc_seq)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         doc_id,
@@ -519,9 +597,10 @@ class LocalStore:
                         ensure_utc(msg.reference_time).isoformat() if msg.reference_time else None,
                         json.dumps(msg.metadata) if msg.metadata else None,
                         msg.metadata.get("focus_hint") if msg.metadata else None,
-                        msg.metadata.get("char_start", 0) if msg.metadata else 0,
-                        msg.metadata.get("char_end", len(msg.content)) if msg.metadata else len(msg.content),
+                        char_start,
+                        char_end,
                         MODEL_NAME,
+                        idx,  # parent_doc_seq tracks message sequence
                     ),
                 )
                 chunk_id = cur.lastrowid
@@ -708,8 +787,8 @@ class LocalStore:
                     except Exception:
                         pass
                 cur.execute(
-                    "UPDATE documents SET title = ?, event_at = ?, tags = ? WHERE id = ?",
-                    (title, now_iso, json.dumps(base_tags | {"note_title": title}), note_id),
+                    "UPDATE documents SET title = ?, event_at = ?, tags = ?, chunk_strategy = ? WHERE id = ?",
+                    (title, now_iso, json.dumps(base_tags | {"note_title": title}), "single-chunk", note_id),
                 )
                 chunk_id = chunk_row["id"] if chunk_row else None
                 chunk_tags = base_tags | {"note_id": note_id, "note_title": title}
@@ -757,6 +836,8 @@ class LocalStore:
                         "event_at": now_iso,
                         "ingested_at": now_iso,
                         "tags": base_tags | {"note_title": title},
+                        "chunk_strategy": "single-chunk",  # Legacy single-chunk strategy
+                        "chunk_version": 1,
                     }
                 )
                 chunk_tags = base_tags | {"note_id": doc_id, "note_title": title}
@@ -807,6 +888,187 @@ class LocalStore:
             "updated_at": now_iso,
             "images": images,
         }
+    
+    def save_note_chunked(
+        self,
+        content: str,
+        title: Optional[str] = None,
+        note_id: Optional[int] = None,
+        expected_updated_at: Optional[str] = None,
+        use_chunking: bool = True,
+    ) -> Optional[dict]:
+        """Save note with optional chunking support.
+        
+        This is the v0.8 enhanced version that supports header-aware chunking.
+        When use_chunking=True, long notes are split into chunks by headers.
+        
+        Args:
+            content: Note content
+            title: Optional title (derived from content if not provided)
+            note_id: Existing note ID for updates
+            expected_updated_at: Expected last update timestamp for conflict detection
+            use_chunking: Whether to use header-aware chunking (default True)
+            
+        Returns:
+            Note dict with metadata
+        """
+        from chunking import HeaderAwareChunker, count_tokens
+        
+        now = datetime.now(UTC)
+        now_iso = ensure_utc(now).isoformat()
+        title = self._derive_note_title(content, provided=title)
+        images = self._extract_image_refs(content)
+        base_tags = {"note_type": "markdown", "last_changed": now_iso}
+        if images:
+            base_tags["images"] = images
+        
+        # Decide whether to use chunking based on content length and structure
+        # Check if note has headers (indicates structure worth preserving)
+        has_headers = '\n#' in content or content.startswith('#')
+        # Use simple length check when tokenizer unavailable (char count / 4 ~= tokens)
+        estimated_tokens = len(content) // 4
+        should_chunk = use_chunking and (estimated_tokens > 300 or (has_headers and estimated_tokens > 200))
+        
+        if not should_chunk:
+            # Fall back to single-chunk behavior for short notes
+            return self.save_note(content, title, note_id, expected_updated_at)
+        
+        # Use header-aware chunking for long notes
+        chunker = HeaderAwareChunker(max_tokens=300)
+        chunks = chunker.chunk(content)
+        
+        # Embed all chunks at once
+        chunk_texts = [c.text for c in chunks]
+        embeddings = self._maybe_embed(chunk_texts)
+        
+        expected_dt = None
+        if expected_updated_at:
+            try:
+                expected_dt = ensure_utc(datetime.fromisoformat(expected_updated_at))
+            except Exception:
+                expected_dt = None
+        
+        with self._connect() as conn:
+            cur = conn.cursor()
+            
+            if note_id:
+                # Update existing note
+                cur.execute("SELECT * FROM documents WHERE id = ? AND doc_type = 'note'", (note_id,))
+                doc_row = cur.fetchone()
+                if not doc_row:
+                    return None
+                
+                # Check for conflicts
+                server_updated_raw = doc_row["event_at"] or doc_row["created_at"]
+                if expected_dt and server_updated_raw:
+                    try:
+                        server_dt = ensure_utc(datetime.fromisoformat(server_updated_raw))
+                        if server_dt and server_dt > expected_dt:
+                            # Get first chunk for conflict payload
+                            cur.execute("SELECT * FROM chunks WHERE document_id = ? AND deleted = 0 ORDER BY seq ASC LIMIT 1", (note_id,))
+                            chunk_row = cur.fetchone()
+                            tags = json.loads(doc_row["tags"]) if doc_row["tags"] else {}
+                            conflict_note = self._build_note_payload(
+                                doc_row, chunk_row, tags.get("images", []),
+                                server_updated_raw, doc_row["created_at"],
+                                note_id, doc_row["title"]
+                            )
+                            raise NoteConflictError(conflict_note)
+                    except NoteConflictError:
+                        raise
+                    except Exception:
+                        pass
+                
+                # Update document metadata
+                cur.execute(
+                    "UPDATE documents SET title = ?, event_at = ?, tags = ?, chunk_strategy = ?, chunk_version = ? WHERE id = ?",
+                    (title, now_iso, json.dumps(base_tags | {"note_title": title}), "header-aware", 1, note_id)
+                )
+                
+                # Get old chunk IDs to remove from FAISS before deleting
+                cur.execute("SELECT id FROM chunks WHERE document_id = ? AND deleted = 0", (note_id,))
+                old_chunk_ids = [row['id'] for row in cur.fetchall()]
+                
+                # Remove old embeddings from FAISS
+                if old_chunk_ids and self._faiss_index:
+                    try:
+                        import numpy as np
+                        selector = faiss.IDSelectorBatch(np.array(old_chunk_ids, dtype="int64"))
+                        self._faiss_index.index.remove_ids(selector)
+                    except Exception as e:
+                        print(f"[warn] Failed to remove old embeddings from FAISS: {e}")
+                
+                # Delete old chunks
+                cur.execute("UPDATE chunks SET deleted = 1 WHERE document_id = ?", (note_id,))
+                
+                # Insert new chunks
+                chunk_ids = []
+                for chunk in chunks:
+                    chunk_tags = base_tags | {"note_id": note_id, "note_title": title}
+                    cur.execute(
+                        """
+                        INSERT INTO chunks (document_id, seq, text, role, token_count, embedding_id, created_at, event_at, tags, focus_hint, char_start, char_end, embedding_model, heading_path, parent_doc_seq)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            note_id, chunk.seq, chunk.text, Role.USER.value, chunk.token_count,
+                            None, now_iso, now_iso, json.dumps(chunk_tags), None,
+                            chunk.char_start, chunk.char_end, MODEL_NAME, chunk.heading_path, chunk.seq
+                        ),
+                    )
+                    chunk_ids.append(cur.lastrowid)
+                
+                created_at = doc_row["created_at"] or now_iso
+            else:
+                # Create new note
+                doc_id = self._insert_document({
+                    "doc_type": "note",
+                    "title": title,
+                    "source": "note",
+                    "created_at": now_iso,
+                    "event_at": now_iso,
+                    "ingested_at": now_iso,
+                    "tags": base_tags | {"note_title": title},
+                    "chunk_strategy": "header-aware",
+                    "chunk_version": 1,
+                })
+                
+                # Insert chunks
+                chunk_ids = []
+                for chunk in chunks:
+                    chunk_tags = base_tags | {"note_id": doc_id, "note_title": title}
+                    cur.execute(
+                        """
+                        INSERT INTO chunks (document_id, seq, text, role, token_count, embedding_id, created_at, event_at, tags, focus_hint, char_start, char_end, embedding_model, heading_path, parent_doc_seq)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            doc_id, chunk.seq, chunk.text, Role.USER.value, chunk.token_count,
+                            None, now_iso, now_iso, json.dumps(chunk_tags), None,
+                            chunk.char_start, chunk.char_end, MODEL_NAME, chunk.heading_path, chunk.seq
+                        ),
+                    )
+                    chunk_ids.append(cur.lastrowid)
+                
+                note_id = doc_id
+                created_at = now_iso
+            
+            # Add embeddings to FAISS
+            if embeddings is not None and self._faiss_index:
+                for idx, chunk_id in enumerate(chunk_ids):
+                    emb_vec = embeddings[idx:idx+1]
+                    self._faiss_index.add([chunk_id], emb_vec)
+                    cur.execute("UPDATE chunks SET embedding_id = ? WHERE id = ?", (chunk_id, chunk_id))
+                self._write_index_meta(cur, now_iso)
+        
+        return {
+            "id": note_id,
+            "title": title,
+            "content": content,
+            "created_at": ensure_utc(datetime.fromisoformat(created_at)).isoformat() if created_at else now_iso,
+            "updated_at": now_iso,
+            "images": images,
+        }
 
     def list_notes(self, limit: int = 50) -> List[dict]:
         with self._connect() as conn:
@@ -845,23 +1107,40 @@ class LocalStore:
             doc_row = cur.fetchone()
             if not doc_row:
                 return None
+            
+            # Get ALL chunks for the note, ordered by sequence
             cur.execute(
                 """
                 SELECT * FROM chunks
                 WHERE document_id = ? AND deleted = 0
                 ORDER BY seq ASC
-                LIMIT 1
                 """,
                 (note_id,),
             )
-            chunk_row = cur.fetchone()
+            chunk_rows = cur.fetchall()
+        
         tags = json.loads(doc_row["tags"]) if doc_row["tags"] else {}
         updated_at = doc_row["event_at"] or doc_row["created_at"]
         images = tags.get("images") or []
+        
+        # Reconstruct full content from all chunks
+        if chunk_rows:
+            # Check if this is a chunked note (multiple chunks or has chunk_strategy)
+            chunk_strategy = doc_row["chunk_strategy"] if "chunk_strategy" in doc_row.keys() else None
+            if len(chunk_rows) > 1 or chunk_strategy == "header-aware":
+                # Reconstruct from multiple chunks by concatenating in order
+                content_parts = [row["text"] for row in chunk_rows]
+                content = "\n\n".join(content_parts)
+            else:
+                # Single chunk - use as-is
+                content = chunk_rows[0]["text"]
+        else:
+            content = ""
+        
         return {
             "id": note_id,
             "title": doc_row["title"] or tags.get("note_title") or "Untitled note",
-            "content": chunk_row["text"] if chunk_row else "",
+            "content": content,
             "created_at": ensure_utc(datetime.fromisoformat(doc_row["created_at"])).isoformat()
             if doc_row["created_at"]
             else None,

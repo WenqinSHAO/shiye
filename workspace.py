@@ -231,7 +231,11 @@ class MemoryWorkspace:
                     scores=candidate.score_history.copy(),  # Pass complete score history
                     rank=rank,
                     tags=chunk.tags if isinstance(chunk.tags, list) else (list(chunk.tags.keys()) if isinstance(chunk.tags, dict) else []),
-                    focus_hint=chunk.focus_hint
+                    focus_hint=chunk.focus_hint,
+                    # v0.8 chunking metadata
+                    heading_path=chunk.heading_path,
+                    page_number=chunk.page_number,
+                    seq=getattr(chunk, 'parent_doc_seq', None)
                 )
                 hits.append(hit)
             except Exception as e:

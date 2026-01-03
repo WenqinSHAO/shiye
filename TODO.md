@@ -8,22 +8,27 @@
 - Tests cover retrieval and storage, but golden-query evaluation is still missing.
 - Orchestrator chat flow still uses the older recall path rather than the new search + ContextPacker.
 
-## Active Work: Chunking & Context (target v0.8)
+## Chunking & Context (v0.8) – Current Status
 
-**Goals**
-- Token-aware chunking sized for `all-MiniLM-L6-v2` (~256 wordpiece tokens).
-- Structure-first splitting for notes/web/papers; stable provenance (heading paths, pages, sequence ids, offsets).
-- Minimal overlap; use neighbor expansion at context-build time to preserve coherence without ballooning the index.
+**Working now**
+- Pluggable chunkers: FixedToken, HeaderAware, SentenceWindow, Message; token-aware sizing with char fallback.
+- Schema v3: heading_path/page_number/parent_doc_seq on chunks; chunk_strategy/chunk_version on documents.
+- Notes: `save_note_chunked()` header-aware chunking (auto-threshold), cumulative offsets, FAISS cleanup on update; `get_note()` reconstructs full content.
+- Chat: `add_messages()` per-message chunks with cumulative offsets; chunk_strategy set on chat docs (including default chat).
+- Tests: chunking + chunked ingestion suites pass (FAISS-dependent test skips if unavailable).
+- Docs: CHUNKING_GUIDE.md and review response docs summarize design/decisions.
 
-**Plan**
-- [ ] Introduce a pluggable chunker abstraction (fixed-token, header-aware, sentence-window, optional semantic) returning chunks with offsets + sequence/heading/page metadata.
-- [ ] Define defaults: chunk_size 240–300 tokens, overlap 0–1 sentence (~10–30 tokens) with tokenizer-based measurement, neighbor expansion `seq ±1/2` when assembling context.
-- [ ] Apply per type: chat = per message + optional 3–7 turn windows; note = header-aware then token windows; web_page = heading-aware with boilerplate stripped; paper = sentence grouping (~260 tokens) with page/section markers; rss_daily_summary = single chunk.
-- [ ] Wire ingestion paths to use the chunker and populate `chunk_window`/heading/path metadata; ensure embeddings respect the chosen max length.
-- [ ] Update context building to pull neighbor chunks by `seq`, and keep citations intact.
-- [ ] Add tests for realized chunk size/overlap per doc type and document configuration knobs in docs.
-- [ ] Migration strategy: version chunking configs, detect legacy chunks missing metadata, and offer a background “rechunk + re-embed + reindex” path (scoped by doc type/version) so strategy changes don’t force full rebuilds when unnecessary.
+**Gaps to close v0.8**
+- Retrieval/UI wiring: `chunk_window` never populated; `context_assembly`/neighbor expansion not used in search results or chat context; heading/page/seq not surfaced in UI via SearchHit.
+- Ingestion coverage: web_page/paper/rss ingestion not using chunkers yet and don’t set chunk_strategy/chunk_version.
+- Migration: no backfill/rechunk command for legacy documents (pre-strategy/pre-heading metadata).
+- Chat policy: only per-message chunks; MessageChunker turn windows unused—decide default vs opt-in and document.
 
+**Next PRs to finish v0.8**
+- Wire `ContextPacker` + `expand_chunks_with_neighbors()` into retrieval/chat; populate `chunk_window` via `build_chunk_window`; pass heading/page/seq through to UI and display.
+- Add chunk_strategy + appropriate chunkers to web_page/paper/rss ingestion paths; add integration tests per doc type.
+- Provide a migration/backfill command to set strategy/version and re-chunk/re-embed legacy docs.
+- Decide/document chat chunking policy (per-message default vs optional window chunks) and reflect in config/docs.
 ## Near-Term Backlog
 
 - Move orchestrator/chat context to `workspace.search()` + `ContextPacker`, retiring `recall()`.
