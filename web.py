@@ -1898,10 +1898,11 @@ def chat(payload=Body(...)) -> dict:
                     timestamp = hit.event_at or hit.created_at
                     timestamp_str = timestamp.strftime('%Y-%m-%d %H:%M') if timestamp else 'unknown'
                     
-                    # Truncate text for preview
-                    preview_text = hit.text[:300]
-                    if len(hit.text) > 300:
-                        preview_text += "..."
+                    # Use chunk_window for preview if available (includes neighbor context)
+                    # otherwise fall back to truncated text
+                    preview_text = hit.chunk_window if hit.chunk_window else hit.text
+                    if len(preview_text) > 300:
+                        preview_text = preview_text[:300] + "..."
                     
                     # Format score
                     score = hit.scores.get('final', 0)
