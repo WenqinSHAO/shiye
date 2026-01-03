@@ -985,6 +985,19 @@ class LocalStore:
                     (title, now_iso, json.dumps(base_tags | {"note_title": title}), "header-aware", 1, note_id)
                 )
                 
+                # Get old chunk IDs to remove from FAISS before deleting
+                cur.execute("SELECT id FROM chunks WHERE document_id = ? AND deleted = 0", (note_id,))
+                old_chunk_ids = [row['id'] for row in cur.fetchall()]
+                
+                # Remove old embeddings from FAISS
+                if old_chunk_ids and self._faiss_index:
+                    try:
+                        import numpy as np
+                        selector = faiss.IDSelectorBatch(np.array(old_chunk_ids, dtype="int64"))
+                        self._faiss_index.index.remove_ids(selector)
+                    except Exception as e:
+                        print(f"[warn] Failed to remove old embeddings from FAISS: {e}")
+                
                 # Delete old chunks
                 cur.execute("UPDATE chunks SET deleted = 1 WHERE document_id = ?", (note_id,))
                 
