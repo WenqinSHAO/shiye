@@ -95,16 +95,16 @@ class Orchestrator:
                 
                 # Convert packed context back to Message format for DSPy
                 ctx = []
-                for item in context_bundle['context_items']:
-                    # Include citation info in metadata
+                for item in context_bundle.get('context_items', []):
+                    # Include citation info in metadata with safe key access
                     ctx.append(Message(
-                        content=item['text'],
+                        content=item.get('text', ''),
                         role=Role.SYSTEM,
                         metadata={
-                            'citation_id': item['citation_id'],
-                            'doc_type': item['doc_type'],
-                            'source': item['source'],
-                            'relevance_score': item['relevance_score']
+                            'citation_id': item.get('citation_id'),
+                            'doc_type': item.get('doc_type'),
+                            'source': item.get('source'),
+                            'relevance_score': item.get('relevance_score', 0.0)
                         }
                     ))
                 

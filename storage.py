@@ -654,16 +654,16 @@ class LocalStore:
         
         now_iso = datetime.now(UTC).isoformat()
         
-        # Add chunk strategy metadata
-        chunk_strategy = "fixed-token"
-        if doc_type == "note":
-            chunk_strategy = "header-aware"
-        elif doc_type == "paper":
-            chunk_strategy = "sentence-window"
-        elif doc_type == "web_page":
-            chunk_strategy = "header-aware"
-        elif doc_type == "rss_daily_summary":
-            chunk_strategy = "fixed-token"
+        # Determine chunk strategy based on chunker type
+        chunk_strategy = type(chunker).__name__.replace('Chunker', '').lower()
+        if 'headeraware' in chunk_strategy:
+            chunk_strategy = 'header-aware'
+        elif 'sentencewindow' in chunk_strategy:
+            chunk_strategy = 'sentence-window'
+        elif 'fixedtoken' in chunk_strategy:
+            chunk_strategy = 'fixed-token'
+        elif 'message' in chunk_strategy:
+            chunk_strategy = 'per-message'
         
         document_meta["chunk_strategy"] = chunk_strategy
         document_meta["chunk_version"] = 1
@@ -697,11 +697,10 @@ class LocalStore:
                 )
                 chunk_ids.append(cur.lastrowid)
             
-            # Add embeddings to FAISS
+            # Add embeddings to FAISS in batch for efficiency
             if embeddings is not None and self._faiss_index:
-                for idx, chunk_id in enumerate(chunk_ids):
-                    emb_vec = embeddings[idx:idx+1]
-                    self._faiss_index.add([chunk_id], emb_vec)
+                self._faiss_index.add(chunk_ids, embeddings)
+                for chunk_id in chunk_ids:
                     cur.execute("UPDATE chunks SET embedding_id = ? WHERE id = ?", (chunk_id, chunk_id))
                 self._write_index_meta(cur, now_iso)
         
