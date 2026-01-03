@@ -22,27 +22,29 @@ Status: v0.7 hybrid retrieval is shipped; chunking v0.8 is partly integrated (no
 
 ## Current Gaps
 
-- `chunk_window` never populated; neighbor expansion/helpers not used in retrieval or UI.
-- Chat flow still calls the older recall path; `ContextPacker` is not in LLM orchestration.
-- Ingestion coverage: only notes/chat use chunkers and set `chunk_strategy`/`chunk_version`; web_page/paper/rss paths remain unchunked/unversioned.
+- ~~All v0.8 retrieval/UI wiring complete: chunk_window, ContextPacker with neighbors, search policy~~.
+- ~~Chat flow now uses search + ContextPacker with intelligent policy (skip/reuse/search)~~.
+- ~~Ingestion coverage: all document types use chunkers and set chunk_strategy/chunk_version~~.
+- ~~Note endpoints: UI notes automatically use chunked saves (header-aware)~~.
+- No migration/backfill tooling for legacy documents (pre-v0.8).
 - No golden-query evaluation harness; no UI notice for missing FTS5.
 
 ## Chunking & Context (v0.8) – Where We Are
 
 **Working**
-- Notes: header-aware chunking (auto threshold), cumulative offsets, FAISS cleanup on updates; `get_note()` rebuilds full content.
-- Chat: per-message chunks with cumulative offsets; chunk_strategy on chat docs (including default chat).
-- Schema/metadata: heading_path, page_number, parent_doc_seq, chunk_strategy, chunk_version present.
-- Chunkers available: FixedToken, HeaderAware, SentenceWindow, Message; token-aware sizing with char fallback.
-- Context helpers exist: expand_chunks_with_neighbors(), build_chunk_window(), provenance utilities.
-- Tests: chunking and chunked ingestion suites pass (FAISS-dependent test skips when unavailable).
+- All document types: chunked ingestion with appropriate chunkers (HeaderAware/SentenceWindow/FixedToken/Message).
+- Notes: UI note endpoints use header-aware chunking by default; cumulative offsets; FAISS cleanup on updates.
+- Chat: per-message chunks with cumulative offsets; search + ContextPacker with intelligent policy (skip/reuse/search based on intent).
+- Schema/metadata: heading_path, page_number, parent_doc_seq, chunk_strategy, chunk_version populated.
+- Context assembly: ContextPacker uses chunk_window (includes neighbors); search policy prevents unconditional searches.
+- Retrieval: chunk_window populated during search; heading/page/seq in SearchHit and UI; neighbor-aware context in LLM.
+- Tests: 47+ tests pass; chunking, ingestion, context assembly, and search policy validated.
 
 **Still to do for v0.8**
-- Populate `chunk_window` during retrieval and surface heading/page/seq in SearchHit/UI.
-- Integrate neighbor expansion/ContextPacker into search and chat context assembly.
-- Apply chunkers + chunk_strategy/version to web_page/paper/rss ingestion, with integration tests.
+- ~~All retrieval, ingestion, context assembly, and search policy items~~ (done in current PR).
 - Provide migration/backfill tooling to re-chunk/re-embed legacy docs and fill strategy/heading metadata.
 - Decide and document chat chunking policy (per-message default vs optional turn windows).
+- Optional refinements: improve search policy heuristics, add alignment filter post-fusion.
 
 ## Retrieval Flow (current)
 

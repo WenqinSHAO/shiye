@@ -7,6 +7,7 @@ from datatypes import Message, ensure_utc
 from embeddings import EmbeddingProvider
 from storage import LocalStore, NoteConflictError
 from retrieval import SearchRequest, SearchHit
+from context_assembly import build_chunk_window
 
 
 @dataclass
@@ -130,7 +131,8 @@ class MemoryWorkspace:
         expected_updated_at: Optional[str] = None,
     ) -> Optional[dict]:
         if self.store:
-            return self.store.save_note(content, title=title, note_id=note_id, expected_updated_at=expected_updated_at)
+            # Use chunked notes by default for better retrieval
+            return self.store.save_note_chunked(content, title=title, note_id=note_id, expected_updated_at=expected_updated_at)
         derived_title = (title or "").strip()
         if not derived_title:
             for line in content.splitlines():
@@ -215,6 +217,11 @@ class MemoryWorkspace:
                 chunk = self.store.get_chunk(candidate.chunk_id)
                 doc = self.store.get_document(candidate.doc_id)
                 
+                # Build chunk_window if not already populated
+                chunk_window = chunk.chunk_window
+                if not chunk_window:
+                    chunk_window = build_chunk_window(self.store, chunk.id, window_size=1)
+                
                 hit = SearchHit(
                     chunk_id=chunk.id,
                     doc_id=doc.get('id', candidate.doc_id),
@@ -224,7 +231,7 @@ class MemoryWorkspace:
                     text=chunk.text,
                     char_start=chunk.char_start,
                     char_end=chunk.char_end,
-                    chunk_window=chunk.chunk_window,
+                    chunk_window=chunk_window,
                     created_at=chunk.created_at,
                     event_at=chunk.reference_time,
                     ingested_at=ensure_utc(datetime.fromisoformat(doc.get('ingested_at'))) if doc.get('ingested_at') else None,
@@ -235,7 +242,7 @@ class MemoryWorkspace:
                     # v0.8 chunking metadata
                     heading_path=chunk.heading_path,
                     page_number=chunk.page_number,
-                    seq=getattr(chunk, 'parent_doc_seq', None)
+                    seq=chunk.parent_doc_seq
                 )
                 hits.append(hit)
             except Exception as e:

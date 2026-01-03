@@ -295,13 +295,19 @@ class ContextPacker:
         self.chars_per_token = 4
     
     def pack(self, hits: List[SearchHit], query: str) -> Dict[str, Any]:
-        """Pack hits into context bundle with citation metadata."""
+        """Pack hits into context bundle with citation metadata.
+        
+        Uses chunk_window (with neighbor context) when available for richer context.
+        """
         context_items = []
         total_tokens = 0
         
         for rank, hit in enumerate(hits, start=1):
+            # Use chunk_window (with neighbor context) if available, else fallback to raw text
+            context_text = hit.chunk_window if hit.chunk_window else hit.text
+            
             # Estimate tokens
-            text_tokens = len(hit.text) // self.chars_per_token
+            text_tokens = len(context_text) // self.chars_per_token
             
             if total_tokens + text_tokens > self.max_tokens:
                 break
@@ -313,7 +319,7 @@ class ContextPacker:
                 'doc_type': hit.doc_type,
                 'source': hit.doc_source,
                 'title': hit.doc_title,
-                'text': hit.text,
+                'text': context_text,  # Now includes neighbor context
                 'event_at': hit.event_at.isoformat() if hit.event_at else None,
                 'created_at': hit.created_at.isoformat(),
                 'relevance_score': hit.scores.get('final', 0.0)
