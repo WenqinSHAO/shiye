@@ -102,87 +102,8 @@ Shiye now features a powerful hybrid search system that combines:
 
 ### Debugging Retrieval
 
-**In Web UI** (recommended for visual debugging):
-
-1. **Enable the debug toggle** in the header (checkbox labeled "Debug")
-2. **Use the `/find` command** as normal:
-   ```
-   /find kubernetes container
-   ```
-
-This displays an interactive debug panel showing:
-- Queries sent to dense (FAISS) and sparse (FTS5) retrievers
-- Number of results at each pipeline stage
-- RRF fusion statistics
-- Whether reranking was applied
-- Post-processors that were run
-- **Top 5 candidates with complete score evolution**:
-  - `dense`: FAISS semantic similarity score
-  - `sparse`: BM25 keyword matching score
-  - `fused`: Reciprocal Rank Fusion combined score
-  - `rerank`: Cross-encoder reranking score (if enabled)
-  - Boost multipliers from post-processors (recency, type, exact match)
-  - `final`: Final score after all processing
-- Text previews for each candidate
-
-The debug panel is collapsible by clicking on the header.
-
-**Example** (with debug toggle enabled):
-```
-/find kubernetes container orchestration
-```
-
-**Output:**
-```
-Found 5 results
-
-[Standard search results display here]
-
-🔍 Debug Info (click to toggle)
-├─ Query & Filters
-│  Query: kubernetes container orchestration
-│  Filters: {}
-├─ Retrieval Pipeline
-│  Dense (FAISS): 500 results → 67 after filtering
-│  Sparse (FTS5): 23 results  
-│  RRF Fusion: 82 unique candidates
-│  Reranked: Yes (top 50)
-│  Post-processors: RecencyBooster, TypeBooster, ExactMatchBooster, Deduplicator
-│  Final: 5 results
-└─ Top Candidates Score Evolution
-   #1 - Chunk 142 (doc 45, note)
-   Final Score: 1.7454
-   Score Evolution:
-     dense: 0.7892    ← FAISS semantic similarity
-     sparse: 0.6891   ← BM25 keyword match
-     fused: 0.0298    ← RRF combined
-     rerank: 0.9234   ← Cross-encoder rerank
-     recency_boost: 1.05
-     type_boost: 1.2
-     exact_match_boost: 1.5
-     final: 1.7454
-   Preview: Kubernetes container orchestration allows...
-```
-
-See [WEB_DEBUG_GUIDE.md](WEB_DEBUG_GUIDE.md) for detailed examples and troubleshooting tips.
-
-**In Terminal** (for detailed logging):
-
-Set the environment variable before starting the application:
-
-```bash
-export SHIYE_DEBUG_RETRIEVAL=true
-python main.py
-```
-
-When enabled, the system will display detailed information about:
-- Queries sent to dense (FAISS) and sparse (FTS5) retrievers
-- Number of results at each stage (FAISS search, filtering, RRF fusion)
-- Scores for each candidate at every processing stage
-- Top-5 candidates with scores after each stage
-- Complete score history for final results
-
-This is particularly useful for understanding why certain results rank higher and for tuning retrieval parameters.
+- Web UI: enable the **Debug** toggle and run `/find <query>` to see dense/sparse/RRF/rerank traces. The panel is collapsible. Full walkthroughs live in [WEB_DEBUG_GUIDE.md](WEB_DEBUG_GUIDE.md) and [DEBUG_RETRIEVAL_GUIDE.md](DEBUG_RETRIEVAL_GUIDE.md).
+- Terminal: start with `SHIYE_DEBUG_RETRIEVAL=true python main.py` for verbose pipeline logs when tuning retrieval parameters.
 
 ### UI Tips
 
@@ -310,7 +231,7 @@ shiye/
 
 ## Vision and Roadmap
 
-See [TODO.md](TODO.md) for detailed planning, architectural decisions, and future milestones.
+See [TODO.md](TODO.md) for detailed planning, architectural decisions, and future milestones. Current focus: token-aware chunking and context upgrades for retrieval (also summarized in [Retrieval.md](Retrieval.md)).
 
 ### Long-term Goals
 
