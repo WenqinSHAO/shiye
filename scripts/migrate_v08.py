@@ -192,9 +192,10 @@ def migrate_document(
         # Always abort migration if embeddings are not available
         # This prevents migrating documents without dense search capability
         if embeddings is None:
-            stats['error'] = 'Embeddings required but not available'
+            stats['error'] = 'Embeddings required but not available - configure embedder to enable migration'
             if verbose:
                 print(f"  [ERROR] Cannot migrate without embeddings")
+                print(f"  [ERROR] Please ensure embedder is properly configured")
             return stats
         
         now_iso = datetime.now(UTC).isoformat()
@@ -309,9 +310,10 @@ def migrate_document(
                     print(f"  Added {len(chunk_ids)} embeddings to FAISS")
             except Exception as e:
                 # If FAISS add fails after commit, we have a problem
-                # Log the error but don't fail the migration since DB is committed
+                # Log detailed error for debugging and manual recovery
                 if verbose:
                     print(f"  [WARN] Failed to add embeddings to FAISS after commit: {e}")
+                    print(f"  [WARN] Document {doc_id}, chunk IDs {chunk_ids[:5]}{'...' if len(chunk_ids) > 5 else ''}")
                     print(f"  [WARN] Database updated but FAISS may be out of sync")
         
         # Only after successful DB commit: remove old embeddings from FAISS
