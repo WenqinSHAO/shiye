@@ -53,6 +53,30 @@ def normalize_chunk_strategy(chunker_class_name: str) -> str:
     return strategy
 
 
+def get_document_chunks_metadata(store: LocalStore, doc_id: int):
+    """Retrieve chunks with full metadata for migration.
+    
+    Args:
+        store: LocalStore instance
+        doc_id: Document ID to retrieve
+        
+    Returns:
+        List of chunk rows with all metadata (text, role, created_at, event_at, embedding_id, etc.)
+    """
+    with store._connect() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, text, role, seq, created_at, event_at, embedding_id
+            FROM chunks
+            WHERE document_id = ? AND deleted = 0
+            ORDER BY seq ASC
+            """,
+            (doc_id,)
+        )
+        return cur.fetchall()
+
+
 def get_document_content(store: LocalStore, doc_id: int, doc_type: str) -> Optional[Union[str, List[str]]]:
     """Retrieve document content for re-chunking.
     
@@ -67,28 +91,17 @@ def get_document_content(store: LocalStore, doc_id: int, doc_type: str) -> Optio
     Returns:
         Document content as string or list of strings for chat
     """
-    with store._connect() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT text, role, seq
-            FROM chunks
-            WHERE document_id = ? AND deleted = 0
-            ORDER BY seq ASC
-            """,
-            (doc_id,)
-        )
-        rows = cur.fetchall()
-        
-        if not rows:
-            return None
-        
-        # For chat documents, return list of message texts
-        if doc_type == 'chat':
-            return [row['text'] for row in rows]
-        
-        # For other documents, concatenate with newlines
-        return '\n'.join(row['text'] for row in rows)
+    chunks_meta = get_document_chunks_metadata(store, doc_id)
+    
+    if not chunks_meta:
+        return None
+    
+    # For chat documents, return list of message texts
+    if doc_type == 'chat':
+        return [row['text'] for row in chunks_meta]
+    
+    # For other documents, concatenate with newlines
+    return '\n'.join(row['text'] for row in chunks_meta)
 
 
 def migrate_document(
@@ -119,17 +132,16 @@ def migrate_document(
     }
     
     try:
-        # Get old chunks
-        with store._connect() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT COUNT(*) as cnt FROM chunks WHERE document_id = ? AND deleted = 0",
-                (doc_id,)
-            )
-            stats['old_chunk_count'] = cur.fetchone()['cnt']
+        # Get old chunks with metadata
+        old_chunks = get_document_chunks_metadata(store, doc_id)
+        stats['old_chunk_count'] = len(old_chunks)
         
         if verbose:
             print(f"  Migrating doc {doc_id} ({doc_type}), {stats['old_chunk_count']} old chunks")
+        
+        if not old_chunks:
+            stats['error'] = 'No content found'
+            return stats
         
         # Get document content
         content = get_document_content(store, doc_id, doc_type)
@@ -182,6 +194,20 @@ def migrate_document(
         with store._connect() as conn:
             cur = conn.cursor()
             
+            # Remove old chunk embeddings from FAISS index before soft-deleting
+            old_embedding_ids = [row['embedding_id'] for row in old_chunks if row['embedding_id'] is not None]
+            if old_embedding_ids and store._faiss_index:
+                try:
+                    import numpy as np
+                    ids_to_remove = np.array(old_embedding_ids, dtype='int64')
+                    store._faiss_index.index.remove_ids(ids_to_remove)
+                    store._faiss_index.persist()
+                    if verbose:
+                        print(f"  Removed {len(old_embedding_ids)} old embeddings from FAISS")
+                except Exception as e:
+                    if verbose:
+                        print(f"  [WARN] Failed to remove old embeddings from FAISS: {e}")
+            
             # Mark old chunks as deleted (soft delete)
             cur.execute(
                 "UPDATE chunks SET deleted = 1 WHERE document_id = ? AND deleted = 0",
@@ -208,9 +234,40 @@ def migrate_document(
                 except:
                     pass
             
-            # Insert new chunks
+            # Map old chunks to new chunks to preserve metadata
+            # For chat docs, order is preserved (1:1 mapping by seq)
+            # For other docs, we use the first old chunk's metadata for all new chunks
             chunk_ids = []
-            for chunk in chunks:
+            for i, chunk in enumerate(chunks):
+                # Determine which old chunk to use for metadata
+                if doc_type == 'chat' and i < len(old_chunks):
+                    # Chat: 1:1 mapping by sequence
+                    old_chunk = old_chunks[i]
+                elif len(old_chunks) > 0:
+                    # Non-chat: use first chunk's metadata (or default to USER role)
+                    old_chunk = old_chunks[0]
+                else:
+                    old_chunk = None
+                
+                # Preserve role from original chunk
+                if old_chunk and old_chunk['role']:
+                    role = old_chunk['role']
+                else:
+                    # Default to USER for non-chat, SYSTEM for chat if no role found
+                    role = Role.USER.value if doc_type != 'chat' else Role.SYSTEM.value
+                
+                # Preserve timestamps from original chunk
+                if old_chunk and old_chunk['created_at']:
+                    created_at = old_chunk['created_at']
+                else:
+                    created_at = now_iso
+                
+                # Preserve event_at, including None values
+                if old_chunk:
+                    event_at = old_chunk['event_at']  # May be None, and that's OK
+                else:
+                    event_at = None
+                
                 cur.execute(
                     """
                     INSERT INTO chunks (document_id, seq, text, role, token_count, embedding_id,
@@ -219,9 +276,9 @@ def migrate_document(
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        doc_id, chunk.seq, chunk.text, Role.SYSTEM.value, chunk.token_count,
+                        doc_id, chunk.seq, chunk.text, role, chunk.token_count,
                         None,  # embedding_id filled after chunk ID is known
-                        now_iso, now_iso, json.dumps(tags), None,
+                        created_at, event_at, json.dumps(tags), None,
                         chunk.char_start, chunk.char_end, MODEL_NAME,
                         chunk.heading_path, chunk.page_number, chunk.seq
                     ),

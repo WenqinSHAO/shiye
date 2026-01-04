@@ -276,6 +276,149 @@ def test_dry_run_mode():
             assert version is None, "Dry run should not update chunk_version"
 
 
+def test_faiss_old_vectors_removed():
+    """Test that old FAISS vectors are removed during migration."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, Message, Role, cfg = make_store(tmp)
+        
+        # Add initial messages with embeddings
+        msgs = [
+            Message(content="Old message 1", role=Role.USER),
+            Message(content="Old message 2", role=Role.ASSISTANT),
+        ]
+        old_ids = store.add_messages(msgs)
+        
+        # Verify initial FAISS state
+        import faiss
+        idx = faiss.read_index(str(cfg.INDEX_PATH))
+        initial_count = idx.ntotal
+        assert initial_count == 2, f"Should have 2 initial vectors, got {initial_count}"
+        
+        # Clear chunk_version to simulate old data
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE documents SET chunk_version = NULL")
+        
+        from migrate_v08 import migrate_document
+        
+        # Get document ID
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM documents LIMIT 1")
+            doc_id = cur.fetchone()['id']
+        
+        # Migrate the document
+        stats = migrate_document(store, doc_id, 'chat', verbose=True, dry_run=False)
+        assert stats['success'], f"Migration failed: {stats.get('error')}"
+        
+        # Verify old vectors were removed and new ones added
+        idx = faiss.read_index(str(cfg.INDEX_PATH))
+        # Should still be 2 vectors (old removed, new added)
+        assert idx.ntotal == 2, f"Expected 2 vectors after migration, got {idx.ntotal}"
+        
+        # Get new chunk IDs
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM chunks WHERE deleted = 0 AND document_id = ?", (doc_id,))
+            new_ids = [row['id'] for row in cur.fetchall()]
+        
+        # Verify old IDs are not the same as new IDs
+        assert set(old_ids) != set(new_ids), "New chunk IDs should be different from old ones"
+
+
+def test_roles_preserved():
+    """Test that roles are preserved during migration for chat documents."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, Message, Role, cfg = make_store(tmp)
+        
+        # Add chat messages with different roles
+        msgs = [
+            Message(content="User question", role=Role.USER),
+            Message(content="Assistant response", role=Role.ASSISTANT),
+            Message(content="User follow-up", role=Role.USER),
+        ]
+        store.add_messages(msgs)
+        
+        # Get document ID and original roles
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM documents LIMIT 1")
+            doc_id = cur.fetchone()['id']
+            
+            cur.execute("SELECT role FROM chunks WHERE document_id = ? AND deleted = 0 ORDER BY seq", (doc_id,))
+            original_roles = [row['role'] for row in cur.fetchall()]
+        
+        # Clear chunk_version to simulate old data
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE documents SET chunk_version = NULL")
+        
+        from migrate_v08 import migrate_document
+        
+        # Migrate
+        stats = migrate_document(store, doc_id, 'chat', verbose=True, dry_run=False)
+        assert stats['success']
+        
+        # Check roles are preserved
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT role FROM chunks WHERE document_id = ? AND deleted = 0 ORDER BY seq", (doc_id,))
+            new_roles = [row['role'] for row in cur.fetchall()]
+        
+        assert new_roles == original_roles, f"Roles should be preserved: expected {original_roles}, got {new_roles}"
+        assert new_roles == ['user', 'assistant', 'user'], f"Expected specific role sequence, got {new_roles}"
+
+
+def test_timestamps_preserved():
+    """Test that timestamps are preserved during migration."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, Message, Role, cfg = make_store(tmp)
+        
+        from datetime import datetime, UTC, timedelta
+        
+        # Add messages with specific timestamps
+        past_time = datetime.now(UTC) - timedelta(days=7)
+        ref_time = datetime.now(UTC) - timedelta(days=6)
+        
+        msgs = [
+            Message(content="Old message", role=Role.USER, created_at=past_time, reference_time=ref_time),
+        ]
+        store.add_messages(msgs)
+        
+        # Get document ID and original timestamps
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM documents LIMIT 1")
+            doc_id = cur.fetchone()['id']
+            
+            cur.execute("SELECT created_at, event_at FROM chunks WHERE document_id = ? AND deleted = 0", (doc_id,))
+            row = cur.fetchone()
+            original_created = row['created_at']
+            original_event = row['event_at']
+        
+        # Clear chunk_version
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE documents SET chunk_version = NULL")
+        
+        from migrate_v08 import migrate_document
+        
+        # Migrate
+        stats = migrate_document(store, doc_id, 'chat', verbose=True, dry_run=False)
+        assert stats['success']
+        
+        # Check timestamps are preserved
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT created_at, event_at FROM chunks WHERE document_id = ? AND deleted = 0", (doc_id,))
+            row = cur.fetchone()
+            new_created = row['created_at']
+            new_event = row['event_at']
+        
+        assert new_created == original_created, f"created_at should be preserved: expected {original_created}, got {new_created}"
+        assert new_event == original_event, f"event_at should be preserved: expected {original_event}, got {new_event}"
+
+
 if __name__ == '__main__':
     # Run tests
     test_normalize_chunk_strategy()
@@ -295,5 +438,14 @@ if __name__ == '__main__':
     
     test_dry_run_mode()
     print("✓ test_dry_run_mode")
+    
+    test_faiss_old_vectors_removed()
+    print("✓ test_faiss_old_vectors_removed")
+    
+    test_roles_preserved()
+    print("✓ test_roles_preserved")
+    
+    test_timestamps_preserved()
+    print("✓ test_timestamps_preserved")
     
     print("\n✓ All tests passed!")

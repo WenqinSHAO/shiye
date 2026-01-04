@@ -36,9 +36,12 @@ Migration script for v0.7 to v0.8 chunking enhancements. This script re-chunks e
 ### Key Fixes
 
 1. **FAISS Update**: Corrected from `add(embeddings, ids)` to `add(ids, embeddings)` (note: `add()` automatically persists to disk)
-2. **Chat Chunking**: Fixed from passing string `chunker.chunk(content)` to list `chunker.chunk(messages)` for MessageChunker
-3. **Strategy Names**: Changed from raw class names like `HeaderAwareChunker` to normalized names like `header-aware`
-4. **Embedding IDs**: Now properly sets `embedding_id` column and writes index metadata after migration
+2. **FAISS Cleanup**: Old chunk embeddings are removed from FAISS index before adding new ones, preventing stale vectors from appearing in search results
+3. **Chat Chunking**: Fixed from passing string `chunker.chunk(content)` to list `chunker.chunk(messages)` for MessageChunker
+4. **Strategy Names**: Changed from raw class names like `HeaderAwareChunker` to normalized names like `header-aware`
+5. **Embedding IDs**: Now properly sets `embedding_id` column and writes index metadata after migration
+6. **Role Preservation**: Chat message roles (user/assistant/system) are preserved during migration instead of being overwritten with SYSTEM
+7. **Timestamp Preservation**: Original `created_at` and `event_at` timestamps are preserved, maintaining recency scoring and history integrity
 
 ### Usage
 
