@@ -31,6 +31,13 @@ from embeddings import EmbeddingProvider
 from storage import LocalStore
 from vector_store import FaissIndex
 
+MIGRATABLE_WHERE_CLAUSE = """
+chunk_version IS NULL
+    OR chunk_version < 1
+    OR chunk_strategy IS NULL
+    OR chunk_strategy NOT IN ('header-aware', 'sentence-window', 'fixed-token', 'per-message', 'single-chunk')
+"""
+
 
 def normalize_chunk_strategy(chunker_class_name: str) -> str:
     """Normalize chunk strategy name to match storage.py conventions.
@@ -67,7 +74,7 @@ def get_document_chunks_metadata(store: LocalStore, doc_id: int):
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT id, text, role, seq, created_at, event_at, embedding_id
+            SELECT id, text, role, seq, created_at, event_at, embedding_id, tags, focus_hint, heading_path, page_number, parent_doc_seq, char_start, char_end
             FROM chunks
             WHERE document_id = ? AND deleted = 0
             ORDER BY seq ASC
@@ -77,31 +84,125 @@ def get_document_chunks_metadata(store: LocalStore, doc_id: int):
         return cur.fetchall()
 
 
-def get_document_content(store: LocalStore, doc_id: int, doc_type: str) -> Optional[Union[str, List[str]]]:
-    """Retrieve document content for re-chunking.
+def _parse_chat_raw_content(raw_content: Optional[str]):
+    """Parse stored raw_content for chat documents."""
+    if not raw_content:
+        return None, None
+    try:
+        data = json.loads(raw_content)
+    except Exception:
+        return None, None
     
-    For chat documents, returns a list of message texts.
-    For other documents, returns the concatenated text.
+    if not isinstance(data, list):
+        return None, None
     
-    Args:
-        store: LocalStore instance
-        doc_id: Document ID to retrieve
-        doc_type: Document type ('chat', 'note', 'web_page', etc.)
-        
-    Returns:
-        Document content as string or list of strings for chat
-    """
+    messages = []
+    metadata = []
+    for item in data:
+        if isinstance(item, dict):
+            messages.append(item.get('content', '') or '')
+            msg_tags = item.get('tags') or item.get('metadata') or {}
+            if isinstance(msg_tags, str):
+                try:
+                    msg_tags = json.loads(msg_tags)
+                except Exception:
+                    msg_tags = {}
+            metadata.append({
+                'role': item.get('role'),
+                'created_at': item.get('created_at'),
+                'event_at': item.get('event_at') or item.get('reference_time'),
+                'tags': msg_tags if isinstance(msg_tags, dict) else {},
+                'focus_hint': item.get('focus_hint') or (msg_tags.get('focus_hint') if isinstance(msg_tags, dict) else None)
+            })
+        else:
+            messages.append(str(item))
+            metadata.append({})
+    
+    return messages, metadata
+
+
+def _chunk_row_to_meta(row, doc_tags: dict) -> dict:
+    """Normalize chunk row metadata for migration."""
+    tags = {}
+    raw_tags = row['tags'] if 'tags' in row.keys() else None
+    if raw_tags:
+        try:
+            tags = json.loads(raw_tags)
+        except Exception:
+            tags = {}
+    if not tags:
+        tags = doc_tags
+    return {
+        'role': row['role'],
+        'created_at': row['created_at'],
+        'event_at': row['event_at'],
+        'tags': tags,
+        'focus_hint': row['focus_hint']
+    }
+
+
+def get_document_sources(
+    store: LocalStore, doc_id: int, doc_type: str
+) -> tuple[Optional[Union[str, List[str]]], List[dict], Optional[str], Optional[dict], List[dict]]:
+    """Load document content, metadata, and raw content for migration."""
+    with store._connect() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, doc_type, title, chunk_strategy, chunk_version, created_at, event_at, ingested_at, raw_content, tags
+            FROM documents
+            WHERE id = ?
+            """,
+            (doc_id,)
+        )
+        doc_row = cur.fetchone()
+    
+    doc_tags = {}
+    if doc_row and doc_row['tags']:
+        try:
+            doc_tags = json.loads(doc_row['tags'])
+        except Exception:
+            doc_tags = {}
+    
     chunks_meta = get_document_chunks_metadata(store, doc_id)
+    raw_content = doc_row['raw_content'] if doc_row else None
+    message_meta: List[dict] = []
+    content: Optional[Union[str, List[str]]] = None
     
-    if not chunks_meta:
-        return None
-    
-    # For chat documents, return list of message texts
     if doc_type == 'chat':
-        return [row['text'] for row in chunks_meta]
+        messages_from_raw, meta_from_raw = _parse_chat_raw_content(raw_content) if raw_content else (None, None)
+        if messages_from_raw:
+            content = messages_from_raw
+            message_meta = meta_from_raw or []
+        elif chunks_meta:
+            content = [row['text'] for row in chunks_meta]
+            message_meta = [_chunk_row_to_meta(row, doc_tags) for row in chunks_meta]
+            # Build raw_content from existing chunks so we persist a source copy
+            raw_content = json.dumps([
+                {
+                    "content": row['text'],
+                    "role": row['role'],
+                    "created_at": row['created_at'],
+                    "event_at": row['event_at'],
+                    "tags": json.loads(row['tags']) if row['tags'] else doc_tags,
+                    "focus_hint": row['focus_hint'],
+                }
+                for row in chunks_meta
+            ])
+    else:
+        if raw_content:
+            content = raw_content
+        elif chunks_meta:
+            content = '\n'.join(row['text'] for row in chunks_meta)
+            raw_content = content
     
-    # For other documents, concatenate with newlines
-    return '\n'.join(row['text'] for row in chunks_meta)
+    return content, message_meta, raw_content, doc_row, chunks_meta
+
+
+def get_document_content(store: LocalStore, doc_id: int, doc_type: str) -> Optional[Union[str, List[str]]]:
+    """Retrieve document content for re-chunking (compat wrapper for tests)."""
+    content, _, _, _, _ = get_document_sources(store, doc_id, doc_type)
+    return content
 
 
 def migrate_document(
@@ -132,19 +233,19 @@ def migrate_document(
     }
     
     try:
-        # Capture original chunking fields for potential rollback on failures
-        with store._connect() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT chunk_strategy, chunk_version FROM documents WHERE id = ?",
-                (doc_id,)
-            )
-            row = cur.fetchone()
-            original_chunk_strategy = row['chunk_strategy'] if row else None
-            original_chunk_version = row['chunk_version'] if row else None
+        content, message_meta, raw_source, doc_row, old_chunks = get_document_sources(store, doc_id, doc_type)
+        original_chunk_strategy = doc_row['chunk_strategy'] if doc_row else None
+        original_chunk_version = doc_row['chunk_version'] if doc_row else None
+        doc_created_at = doc_row['created_at'] if doc_row else None
+        doc_event_at = doc_row['event_at'] if doc_row else None
+        doc_ingested_at = doc_row['ingested_at'] if doc_row else None
+        doc_tags = {}
+        if doc_row and doc_row['tags']:
+            try:
+                doc_tags = json.loads(doc_row['tags'])
+            except Exception:
+                doc_tags = {}
         
-        # Get old chunks with metadata
-        old_chunks = get_document_chunks_metadata(store, doc_id)
         stats['old_chunk_count'] = len(old_chunks)
         
         if verbose:
@@ -154,8 +255,6 @@ def migrate_document(
             stats['error'] = 'No content found'
             return stats
         
-        # Get document content
-        content = get_document_content(store, doc_id, doc_type)
         if content is None:
             stats['error'] = 'No content found'
             return stats
@@ -213,57 +312,51 @@ def migrate_document(
         
         # Normalize chunk strategy
         chunk_strategy = normalize_chunk_strategy(type(chunker).__name__)
+        raw_to_store = raw_source
+        if raw_to_store is None:
+            if doc_type == 'chat' and isinstance(content, list):
+                raw_to_store = json.dumps([{"content": c} for c in content])
+            elif isinstance(content, str):
+                raw_to_store = content
         
         # Get old embedding IDs that need to be removed from FAISS
         # Also store old chunk IDs for selective soft-delete
         old_chunk_ids = [row['id'] for row in old_chunks]
         old_embedding_ids = [row['embedding_id'] for row in old_chunks if row['embedding_id'] is not None]
+        index_requires_update = store._faiss_index is not None
         
         with store._connect() as conn:
             cur = conn.cursor()
-            
-            # Get document metadata for tags
-            cur.execute("SELECT tags FROM documents WHERE id = ?", (doc_id,))
-            doc_row = cur.fetchone()
-            tags = {}
-            if doc_row and doc_row['tags']:
-                try:
-                    tags = json.loads(doc_row['tags'])
-                except:
-                    pass
-            
+
             # Insert new chunks first (before deleting old ones)
             # This ensures we can roll back if anything fails
             chunk_ids = []
             for i, chunk in enumerate(chunks):
-                # Determine which old chunk to use for metadata
-                if doc_type == 'chat' and i < len(old_chunks):
-                    # Chat: 1:1 mapping by sequence
-                    old_chunk = old_chunks[i]
-                elif len(old_chunks) > 0:
-                    # Non-chat: use first chunk's metadata (or default to USER role)
-                    old_chunk = old_chunks[0]
-                else:
-                    old_chunk = None
+                metadata_source: dict = {}
+                if doc_type == 'chat':
+                    if i < len(message_meta):
+                        metadata_source = message_meta[i] or {}
+                    elif message_meta:
+                        metadata_source = message_meta[-1] or {}
+                if not metadata_source and old_chunks:
+                    source_row = old_chunks[i] if i < len(old_chunks) else old_chunks[0]
+                    metadata_source = _chunk_row_to_meta(source_row, doc_tags)
                 
+                tags = metadata_source.get('tags') if metadata_source else doc_tags
+                focus_hint = metadata_source.get('focus_hint') if metadata_source else None
                 # Preserve role from original chunk
-                if old_chunk and old_chunk['role']:
-                    role = old_chunk['role']
-                else:
-                    # Default to USER for non-chat, SYSTEM for chat if no role found
+                role = metadata_source.get('role') if metadata_source else None
+                if not role:
                     role = Role.USER.value if doc_type != 'chat' else Role.SYSTEM.value
                 
-                # Preserve timestamps from original chunk
-                if old_chunk and old_chunk['created_at']:
-                    created_at = old_chunk['created_at']
-                else:
-                    created_at = now_iso
+                created_at = metadata_source.get('created_at') if metadata_source else None
+                if not created_at:
+                    created_at = doc_created_at or doc_ingested_at or now_iso
                 
                 # Preserve event_at, including None values
-                if old_chunk:
-                    event_at = old_chunk['event_at']  # May be None, and that's OK
-                else:
-                    event_at = None
+                event_at = metadata_source.get('event_at') if metadata_source else None
+                if event_at is None:
+                    event_at = doc_event_at
                 
                 cur.execute(
                     """
@@ -275,7 +368,7 @@ def migrate_document(
                     (
                         doc_id, chunk.seq, chunk.text, role, chunk.token_count,
                         None,  # embedding_id filled after chunk ID is known
-                        created_at, event_at, json.dumps(tags), None,
+                        created_at, event_at, json.dumps(tags) if tags else None, focus_hint,
                         chunk.char_start, chunk.char_end, MODEL_NAME,
                         chunk.heading_path, chunk.page_number, chunk.seq
                     ),
@@ -289,26 +382,8 @@ def migrate_document(
                         "UPDATE chunks SET embedding_id = ? WHERE id = ?",
                         (chunk_id, chunk_id)
                     )
-            
-            # Only after successful embedding and DB inserts: soft-delete OLD chunks specifically
-            # Use the old_chunk_ids list to avoid deleting newly created chunks
-            if old_chunk_ids:
-                # Build parameterized query with correct number of placeholders
-                placeholders = ','.join(['?'] * len(old_chunk_ids))
-                query = f"UPDATE chunks SET deleted = 1 WHERE id IN ({placeholders})"
-                cur.execute(query, old_chunk_ids)
-            
-            # Update document with chunk strategy
-            cur.execute(
-                """
-                UPDATE documents 
-                SET chunk_strategy = ?, chunk_version = 1
-                WHERE id = ?
-                """,
-                (chunk_strategy, doc_id)
-            )
         
-        faiss_add_succeeded = False
+        faiss_add_succeeded = not index_requires_update
         faiss_error = None
         
         # Only after successful DB commit: add new embeddings to FAISS
@@ -345,12 +420,9 @@ def migrate_document(
                 store._write_index_meta(cur, now_iso)
         
         # If FAISS add failed, attempt to restore DB state so old chunks remain active
-        if store._faiss_index and not faiss_add_succeeded:
+        if index_requires_update and not faiss_add_succeeded:
             with store._connect() as conn:
                 cur = conn.cursor()
-                if old_chunk_ids:
-                    placeholders_old = ','.join(['?'] * len(old_chunk_ids))
-                    cur.execute(f"UPDATE chunks SET deleted = 0 WHERE id IN ({placeholders_old})", old_chunk_ids)
                 if chunk_ids:
                     placeholders_new = ','.join(['?'] * len(chunk_ids))
                     cur.execute(f"UPDATE chunks SET deleted = 1 WHERE id IN ({placeholders_new})", chunk_ids)
@@ -360,6 +432,21 @@ def migrate_document(
                 )
             stats['error'] = faiss_error or 'FAISS update failed'
             return stats
+        
+        # Only after index sync succeeds (or is not required) do we swap active chunks
+        with store._connect() as conn:
+            cur = conn.cursor()
+            if old_chunk_ids:
+                placeholders_old = ','.join(['?'] * len(old_chunk_ids))
+                cur.execute(f"UPDATE chunks SET deleted = 1 WHERE id IN ({placeholders_old})", old_chunk_ids)
+            cur.execute(
+                """
+                UPDATE documents 
+                SET chunk_strategy = ?, chunk_version = 1, raw_content = COALESCE(raw_content, ?)
+                WHERE id = ?
+                """,
+                (chunk_strategy, raw_to_store, doc_id)
+            )
         
         stats['success'] = True
         if verbose:
@@ -414,9 +501,9 @@ def main():
         elif args.doc_type:
             # Migrate documents of specific type
             cur.execute(
-                """
+                f"""
                 SELECT id, doc_type, title FROM documents 
-                WHERE doc_type = ? AND (chunk_version IS NULL OR chunk_version < 1)
+                WHERE doc_type = ? AND ({MIGRATABLE_WHERE_CLAUSE})
                 ORDER BY id
                 """,
                 (args.doc_type,)
@@ -424,9 +511,9 @@ def main():
         else:
             # Migrate all documents without v0.8 chunking
             cur.execute(
-                """
+                f"""
                 SELECT id, doc_type, title FROM documents 
-                WHERE chunk_version IS NULL OR chunk_version < 1
+                WHERE {MIGRATABLE_WHERE_CLAUSE}
                 ORDER BY id
                 """
             )

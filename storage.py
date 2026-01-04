@@ -182,7 +182,8 @@ class LocalStore:
                     tags TEXT,
                     sensitivity TEXT,
                     hash TEXT,
-                    status TEXT
+                    status TEXT,
+                    raw_content TEXT
                 )
                 """
             )
@@ -411,8 +412,25 @@ class LocalStore:
                 if 'chunk_strategy' not in doc_columns:
                     # Add chunking config columns to documents table
                     cur.execute("ALTER TABLE documents ADD COLUMN chunk_strategy TEXT")
-                    cur.execute("ALTER TABLE documents ADD COLUMN chunk_version INTEGER DEFAULT 1")
-                    print("[info] Added chunking config columns to documents table")
+                    print("[info] Added chunk_strategy column to documents table")
+                
+                if 'chunk_version' not in doc_columns:
+                    cur.execute("ALTER TABLE documents ADD COLUMN chunk_version INTEGER")
+                    print("[info] Added chunk_version column to documents table")
+                
+                if 'raw_content' not in doc_columns:
+                    cur.execute("ALTER TABLE documents ADD COLUMN raw_content TEXT")
+                    print("[info] Added raw_content column to documents table")
+                
+                # Ensure legacy rows without chunk_strategy are flagged for migration
+                if 'chunk_version' in doc_columns and 'chunk_strategy' in doc_columns:
+                    cur.execute(
+                        """
+                        UPDATE documents
+                        SET chunk_version = NULL
+                        WHERE chunk_strategy IS NULL AND (chunk_version IS NULL OR chunk_version = 1)
+                        """
+                    )
                 
                 print("[info] Schema migration v3 completed successfully")
         except Exception as e:
@@ -508,8 +526,8 @@ class LocalStore:
             cur = conn.cursor()
             cur.execute(
                 """
-                INSERT INTO documents (source, uri, doc_type, created_at, event_at, ingested_at, title, tags, sensitivity, hash, status, chunk_strategy, chunk_version)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO documents (source, uri, doc_type, created_at, event_at, ingested_at, title, tags, sensitivity, hash, status, raw_content, chunk_strategy, chunk_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     doc_meta.get("source"),
@@ -523,6 +541,7 @@ class LocalStore:
                     doc_meta.get("sensitivity"),
                     doc_meta.get("hash"),
                     doc_meta.get("status"),
+                    doc_meta.get("raw_content"),
                     doc_meta.get("chunk_strategy"),  # v0.8: track chunking strategy
                     doc_meta.get("chunk_version", 1),  # v0.8: version for migrations
                 ),
@@ -534,6 +553,7 @@ class LocalStore:
         if not messages:
             return ids
         embeddings = self._maybe_embed([m.content for m in messages])
+        raw_messages = [m.to_dict() for m in messages]
         
         # Determine if we're creating a new document or using default chat
         doc_id = self.default_doc_id
@@ -542,9 +562,12 @@ class LocalStore:
         if document_meta:
             try:
                 # Add chunking strategy for chat documents
-                if document_meta.get("doc_type") == "chat" and "chunk_strategy" not in document_meta:
-                    document_meta["chunk_strategy"] = "per-message"
-                    document_meta["chunk_version"] = 1
+                if document_meta.get("doc_type") == "chat":
+                    document_meta.setdefault("chunk_strategy", "per-message")
+                    document_meta["chunk_version"] = document_meta.get("chunk_version", 1)
+                    document_meta.setdefault("raw_content", json.dumps(raw_messages))
+                else:
+                    document_meta.setdefault("chunk_version", 1)
                 doc_id = self._insert_document(document_meta)
             except Exception as e:
                 print(f"[warn] failed to insert document, falling back to default: {e}")
@@ -667,6 +690,7 @@ class LocalStore:
         
         document_meta["chunk_strategy"] = chunk_strategy
         document_meta["chunk_version"] = 1
+        document_meta.setdefault("raw_content", content)
         if "created_at" not in document_meta:
             document_meta["created_at"] = now_iso
         if "ingested_at" not in document_meta:
@@ -879,8 +903,8 @@ class LocalStore:
                     except Exception:
                         pass
                 cur.execute(
-                    "UPDATE documents SET title = ?, event_at = ?, tags = ?, chunk_strategy = ? WHERE id = ?",
-                    (title, now_iso, json.dumps(base_tags | {"note_title": title}), "single-chunk", note_id),
+                    "UPDATE documents SET title = ?, event_at = ?, tags = ?, chunk_strategy = ?, raw_content = ? WHERE id = ?",
+                    (title, now_iso, json.dumps(base_tags | {"note_title": title}), "single-chunk", content, note_id),
                 )
                 chunk_id = chunk_row["id"] if chunk_row else None
                 chunk_tags = base_tags | {"note_id": note_id, "note_title": title}
@@ -928,6 +952,7 @@ class LocalStore:
                         "event_at": now_iso,
                         "ingested_at": now_iso,
                         "tags": base_tags | {"note_title": title},
+                        "raw_content": content,
                         "chunk_strategy": "single-chunk",  # Legacy single-chunk strategy
                         "chunk_version": 1,
                     }
@@ -1073,8 +1098,8 @@ class LocalStore:
                 
                 # Update document metadata
                 cur.execute(
-                    "UPDATE documents SET title = ?, event_at = ?, tags = ?, chunk_strategy = ?, chunk_version = ? WHERE id = ?",
-                    (title, now_iso, json.dumps(base_tags | {"note_title": title}), "header-aware", 1, note_id)
+                    "UPDATE documents SET title = ?, event_at = ?, tags = ?, raw_content = ?, chunk_strategy = ?, chunk_version = ? WHERE id = ?",
+                    (title, now_iso, json.dumps(base_tags | {"note_title": title}), content, "header-aware", 1, note_id)
                 )
                 
                 # Get old chunk IDs to remove from FAISS before deleting
@@ -1121,6 +1146,7 @@ class LocalStore:
                     "event_at": now_iso,
                     "ingested_at": now_iso,
                     "tags": base_tags | {"note_title": title},
+                    "raw_content": content,
                     "chunk_strategy": "header-aware",
                     "chunk_version": 1,
                 })

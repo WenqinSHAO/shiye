@@ -1,6 +1,7 @@
 """Tests for v0.8 migration script."""
 
 import importlib
+import json
 import os
 import sys
 import tempfile
@@ -12,6 +13,8 @@ import numpy as np
 
 # Add scripts directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
+
+from migrate_v08 import MIGRATABLE_WHERE_CLAUSE
 
 
 class FakeEmbedder:
@@ -62,6 +65,21 @@ def test_normalize_chunk_strategy():
     assert normalize_chunk_strategy('SentenceWindowChunker') == 'sentence-window'
     assert normalize_chunk_strategy('FixedTokenChunker') == 'fixed-token'
     assert normalize_chunk_strategy('MessageChunker') == 'per-message'
+
+
+def test_selection_when_strategy_missing():
+    """Documents with chunk_strategy NULL should still be selected even if chunk_version=1."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, Message, Role, cfg = make_store(tmp)
+        
+        store.add_messages([Message(content="Hello", role=Role.USER)])
+        
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE documents SET chunk_strategy = NULL WHERE id = (SELECT id FROM documents LIMIT 1)")
+            cur.execute(f"SELECT COUNT(*) as cnt FROM documents WHERE {MIGRATABLE_WHERE_CLAUSE}")
+            row = cur.fetchone()
+            assert row['cnt'] == 1, "Legacy document should be picked up for migration"
 
 
 def test_faiss_parameter_order():
@@ -370,6 +388,63 @@ def test_roles_preserved():
         assert new_roles == ['user', 'assistant', 'user'], f"Expected specific role sequence, got {new_roles}"
 
 
+def test_raw_content_and_chunk_metadata_preserved():
+    """Migration should prefer raw_content and keep per-chunk metadata."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, Message, Role, cfg = make_store(tmp)
+        
+        # Seed chat with metadata that differs from stored chunks
+        store.add_messages([Message(content="Stale chunk", role=Role.USER, metadata={"topic": "stale"})])
+        
+        raw_created = "2024-01-02T03:04:05+00:00"
+        raw_event = "2024-01-03T03:04:05+00:00"
+        raw_payload = [{
+            "content": "Raw restored content",
+            "role": "assistant",
+            "created_at": raw_created,
+            "event_at": raw_event,
+            "tags": {"topic": "raw", "focus_hint": "raw_hint"},
+            "focus_hint": "raw_hint",
+        }]
+        
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM documents LIMIT 1")
+            doc_id = cur.fetchone()['id']
+            cur.execute(
+                "UPDATE documents SET chunk_strategy = NULL, raw_content = ?, chunk_version = 1 WHERE id = ?",
+                (json.dumps(raw_payload), doc_id),
+            )
+            cur.execute(
+                "UPDATE chunks SET text = 'stale chunk', tags = ?, focus_hint = NULL WHERE document_id = ?",
+                (json.dumps({"topic": "stale"}), doc_id),
+            )
+        
+        from migrate_v08 import migrate_document
+        
+        stats = migrate_document(store, doc_id, 'chat', verbose=True, dry_run=False)
+        assert stats['success']
+        
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT text, role, created_at, event_at, tags, focus_hint FROM chunks WHERE document_id = ? AND deleted = 0",
+                (doc_id,),
+            )
+            row = cur.fetchone()
+            assert row['text'] == "Raw restored content"
+            assert row['role'] == "assistant"
+            assert row['created_at'] == raw_created
+            assert row['event_at'] == raw_event
+            tags = json.loads(row['tags'])
+            assert tags.get("topic") == "raw"
+            assert row['focus_hint'] == "raw_hint"
+            
+            cur.execute("SELECT raw_content FROM documents WHERE id = ?", (doc_id,))
+            stored_raw = json.loads(cur.fetchone()['raw_content'])
+            assert stored_raw[0]['content'] == "Raw restored content"
+
+
 def test_timestamps_preserved():
     """Test that timestamps are preserved during migration."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -418,6 +493,41 @@ def test_timestamps_preserved():
         
         assert new_created == original_created, f"created_at should be preserved: expected {original_created}, got {new_created}"
         assert new_event == original_event, f"event_at should be preserved: expected {original_event}, got {new_event}"
+
+
+def test_missing_timestamps_use_document_times():
+    """Missing chunk timestamps should fall back to document timestamps, not now()."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, Message, Role, cfg = make_store(tmp)
+        
+        store.add_messages([Message(content="Needs timestamps", role=Role.USER)])
+        
+        from datetime import datetime, UTC, timedelta
+        doc_created = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+        
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM documents LIMIT 1")
+            doc_id = cur.fetchone()['id']
+            cur.execute(
+                "UPDATE documents SET created_at = ?, event_at = NULL, chunk_strategy = NULL WHERE id = ?",
+                (doc_created, doc_id),
+            )
+            cur.execute(
+                "UPDATE chunks SET created_at = NULL, event_at = NULL WHERE document_id = ?",
+                (doc_id,),
+            )
+        
+        from migrate_v08 import migrate_document
+        stats = migrate_document(store, doc_id, 'chat', verbose=True, dry_run=False)
+        assert stats['success']
+        
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT created_at, event_at FROM chunks WHERE document_id = ? AND deleted = 0", (doc_id,))
+            row = cur.fetchone()
+            assert row['created_at'] == doc_created
+            assert row['event_at'] is None
 
 
 def test_migration_aborts_without_embeddings():
@@ -532,6 +642,13 @@ def test_faiss_add_failure_restores_db_and_vectors(monkeypatch):
             meta_row = cur.fetchone()
             after_sync = meta_row['last_sync_ts'] if meta_row else None
             assert after_sync == prev_sync
+            
+            # FTS index should still reflect active chunks
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='chunks_fts'")
+            if cur.fetchone():
+                cur.execute("SELECT COUNT(*) as cnt FROM chunks_fts")
+                fts_count = cur.fetchone()['cnt']
+                assert fts_count == old_active
         
         # FAISS index should retain old vectors (count unchanged)
         idx = faiss.read_index(str(cfg.INDEX_PATH))
@@ -542,6 +659,8 @@ if __name__ == '__main__':
     # Run tests
     test_normalize_chunk_strategy()
     print("✓ test_normalize_chunk_strategy")
+    test_selection_when_strategy_missing()
+    print("✓ test_selection_when_strategy_missing")
     
     test_faiss_parameter_order()
     print("✓ test_faiss_parameter_order")
@@ -566,6 +685,10 @@ if __name__ == '__main__':
     
     test_timestamps_preserved()
     print("✓ test_timestamps_preserved")
+    test_missing_timestamps_use_document_times()
+    print("✓ test_missing_timestamps_use_document_times")
+    test_raw_content_and_chunk_metadata_preserved()
+    print("✓ test_raw_content_and_chunk_metadata_preserved")
     
     test_migration_aborts_without_embeddings()
     print("✓ test_migration_aborts_without_embeddings")
