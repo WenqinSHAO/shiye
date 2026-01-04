@@ -6,6 +6,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+import faiss
 import numpy as np
 
 # Add scripts directory to path
@@ -289,7 +290,6 @@ def test_faiss_old_vectors_removed():
         old_ids = store.add_messages(msgs)
         
         # Verify initial FAISS state
-        import faiss
         idx = faiss.read_index(str(cfg.INDEX_PATH))
         initial_count = idx.ntotal
         assert initial_count == 2, f"Should have 2 initial vectors, got {initial_count}"

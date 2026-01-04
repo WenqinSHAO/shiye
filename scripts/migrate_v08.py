@@ -198,7 +198,6 @@ def migrate_document(
             old_embedding_ids = [row['embedding_id'] for row in old_chunks if row['embedding_id'] is not None]
             if old_embedding_ids and store._faiss_index:
                 try:
-                    import numpy as np
                     ids_to_remove = np.array(old_embedding_ids, dtype='int64')
                     store._faiss_index.index.remove_ids(ids_to_remove)
                     store._faiss_index.persist()
