@@ -31,12 +31,30 @@ from embeddings import EmbeddingProvider
 from storage import LocalStore
 from vector_store import FaissIndex
 
-MIGRATABLE_WHERE_CLAUSE = """
+EXPECTED_STRATEGY_CASE = """
+CASE doc_type
+    WHEN 'chat' THEN 'per-message'
+    WHEN 'note' THEN 'header-aware'
+    WHEN 'web_page' THEN 'header-aware'
+    WHEN 'paper' THEN 'sentence-window'
+    WHEN 'rss_daily_summary' THEN 'fixed-token'
+    ELSE NULL
+END
+"""
+
+MIGRATABLE_WHERE_CLAUSE = f"""
 chunk_version IS NULL
     OR chunk_version < 1
     OR chunk_strategy IS NULL
     OR chunk_strategy NOT IN ('header-aware', 'sentence-window', 'fixed-token', 'per-message', 'single-chunk')
+    OR (
+        chunk_strategy IS NOT NULL
+        AND {EXPECTED_STRATEGY_CASE} IS NOT NULL
+        AND chunk_strategy != {EXPECTED_STRATEGY_CASE}
+    )
 """
+
+NORMALIZED_STRATEGIES = {'header-aware', 'sentence-window', 'fixed-token', 'per-message', 'single-chunk'}
 
 
 def normalize_chunk_strategy(chunker_class_name: str) -> str:
@@ -58,6 +76,31 @@ def normalize_chunk_strategy(chunker_class_name: str) -> str:
     elif 'message' in strategy:
         return 'per-message'
     return strategy
+
+
+def expected_strategy_for_doc_type(doc_type: Optional[str]) -> Optional[str]:
+    """Return normalized strategy expected for a given doc_type."""
+    try:
+        chunker = get_chunker_for_doctype(doc_type or 'web_page')
+    except Exception:
+        return None
+    return normalize_chunk_strategy(type(chunker).__name__)
+
+
+def should_migrate_doc(doc_row) -> bool:
+    """Determine if a document row should be migrated."""
+    strategy = doc_row['chunk_strategy']
+    version = doc_row['chunk_version']
+    
+    if strategy is None or version is None or version < 1:
+        return True
+    if strategy not in NORMALIZED_STRATEGIES:
+        return True
+    
+    expected = expected_strategy_for_doc_type(doc_row['doc_type'])
+    if expected and strategy != expected:
+        return True
+    return False
 
 
 def get_document_chunks_metadata(store: LocalStore, doc_id: int):
@@ -491,34 +534,21 @@ def main():
     # Get documents to migrate
     with store._connect() as conn:
         cur = conn.cursor()
+        base_query = "SELECT id, doc_type, title, chunk_strategy, chunk_version FROM documents"
         
         if args.doc_id:
             # Migrate specific document
             cur.execute(
-                "SELECT id, doc_type, title FROM documents WHERE id = ?",
+                f"{base_query} WHERE id = ?",
                 (args.doc_id,)
             )
+            documents = cur.fetchall()
         elif args.doc_type:
-            # Migrate documents of specific type
-            cur.execute(
-                f"""
-                SELECT id, doc_type, title FROM documents 
-                WHERE doc_type = ? AND ({MIGRATABLE_WHERE_CLAUSE})
-                ORDER BY id
-                """,
-                (args.doc_type,)
-            )
+            cur.execute(f"{base_query} WHERE doc_type = ? ORDER BY id", (args.doc_type,))
+            documents = [row for row in cur.fetchall() if should_migrate_doc(row)]
         else:
-            # Migrate all documents without v0.8 chunking
-            cur.execute(
-                f"""
-                SELECT id, doc_type, title FROM documents 
-                WHERE {MIGRATABLE_WHERE_CLAUSE}
-                ORDER BY id
-                """
-            )
-        
-        documents = cur.fetchall()
+            cur.execute(f"{base_query} ORDER BY id")
+            documents = [row for row in cur.fetchall() if should_migrate_doc(row)]
     
     if not documents:
         print("\n✓ No documents need migration")

@@ -14,7 +14,7 @@ import numpy as np
 # Add scripts directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
 
-from migrate_v08 import MIGRATABLE_WHERE_CLAUSE
+from migrate_v08 import MIGRATABLE_WHERE_CLAUSE, should_migrate_doc, expected_strategy_for_doc_type
 
 
 class FakeEmbedder:
@@ -80,6 +80,42 @@ def test_selection_when_strategy_missing():
             cur.execute(f"SELECT COUNT(*) as cnt FROM documents WHERE {MIGRATABLE_WHERE_CLAUSE}")
             row = cur.fetchone()
             assert row['cnt'] == 1, "Legacy document should be picked up for migration"
+
+
+def test_selection_when_strategy_mismatched():
+    """Documents with mismatched strategy vs doc_type should be migrated even when chunk_version=1."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, Message, Role, cfg = make_store(tmp)
+        
+        store.add_messages([Message(content="Hello mismatch", role=Role.USER)])
+        
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id, doc_type FROM documents LIMIT 1")
+            row = cur.fetchone()
+            doc_id = row['id']
+            doc_type = row['doc_type']
+            cur.execute(
+                "UPDATE documents SET chunk_strategy = 'fixed-token', chunk_version = 1 WHERE id = ?",
+                (doc_id,),
+            )
+            cur.execute(f"SELECT COUNT(*) as cnt FROM documents WHERE {MIGRATABLE_WHERE_CLAUSE}")
+            assert cur.fetchone()['cnt'] == 1, "Mismatch should satisfy migratable clause"
+        
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM documents WHERE id = ?", (doc_id,))
+            assert should_migrate_doc(cur.fetchone())
+        
+        from migrate_v08 import migrate_document
+        stats = migrate_document(store, doc_id, doc_type, verbose=True, dry_run=False)
+        assert stats['success']
+        
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT chunk_strategy FROM documents WHERE id = ?", (doc_id,))
+            strategy = cur.fetchone()['chunk_strategy']
+            assert strategy == expected_strategy_for_doc_type(doc_type)
 
 
 def test_faiss_parameter_order():
