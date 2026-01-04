@@ -290,11 +290,10 @@ def migrate_document(
             # Only after successful embedding and DB inserts: soft-delete OLD chunks specifically
             # Use the old_chunk_ids list to avoid deleting newly created chunks
             if old_chunk_ids:
-                placeholders = ','.join('?' * len(old_chunk_ids))
-                cur.execute(
-                    f"UPDATE chunks SET deleted = 1 WHERE id IN ({placeholders})",
-                    old_chunk_ids
-                )
+                # Build parameterized query with correct number of placeholders
+                placeholders = ','.join(['?'] * len(old_chunk_ids))
+                query = f"UPDATE chunks SET deleted = 1 WHERE id IN ({placeholders})"
+                cur.execute(query, old_chunk_ids)
             
             # Update document with chunk strategy
             cur.execute(
