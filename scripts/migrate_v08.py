@@ -132,6 +132,17 @@ def migrate_document(
     }
     
     try:
+        # Capture original chunking fields for potential rollback on failures
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT chunk_strategy, chunk_version FROM documents WHERE id = ?",
+                (doc_id,)
+            )
+            row = cur.fetchone()
+            original_chunk_strategy = row['chunk_strategy'] if row else None
+            original_chunk_version = row['chunk_version'] if row else None
+        
         # Get old chunks with metadata
         old_chunks = get_document_chunks_metadata(store, doc_id)
         stats['old_chunk_count'] = len(old_chunks)
@@ -278,10 +289,6 @@ def migrate_document(
                         "UPDATE chunks SET embedding_id = ? WHERE id = ?",
                         (chunk_id, chunk_id)
                     )
-                
-                # Write index metadata
-                if store._faiss_index:
-                    store._write_index_meta(cur, now_iso)
             
             # Only after successful embedding and DB inserts: soft-delete OLD chunks specifically
             # Use the old_chunk_ids list to avoid deleting newly created chunks
@@ -301,24 +308,26 @@ def migrate_document(
                 (chunk_strategy, doc_id)
             )
         
+        faiss_add_succeeded = False
+        faiss_error = None
+        
         # Only after successful DB commit: add new embeddings to FAISS
         # This ensures if commit fails, FAISS won't have orphaned vectors
         if embeddings is not None and store._faiss_index:
             try:
                 store._faiss_index.add(chunk_ids, embeddings)
+                faiss_add_succeeded = True
                 if verbose:
                     print(f"  Added {len(chunk_ids)} embeddings to FAISS")
             except Exception as e:
-                # If FAISS add fails after commit, we have a problem
-                # Log detailed error for debugging and manual recovery
+                faiss_error = str(e)
                 if verbose:
                     print(f"  [WARN] Failed to add embeddings to FAISS after commit: {e}")
                     print(f"  [WARN] Document {doc_id}, chunk IDs {chunk_ids[:5]}{'...' if len(chunk_ids) > 5 else ''}")
                     print(f"  [WARN] Database updated but FAISS may be out of sync")
         
-        # Only after successful DB commit: remove old embeddings from FAISS
-        # This ensures FAISS and DB stay in sync
-        if old_embedding_ids and store._faiss_index:
+        # Only remove old embeddings if new ones were added successfully
+        if faiss_add_succeeded and old_embedding_ids and store._faiss_index:
             try:
                 ids_to_remove = np.array(old_embedding_ids, dtype='int64')
                 store._faiss_index.index.remove_ids(ids_to_remove)
@@ -328,6 +337,29 @@ def migrate_document(
             except Exception as e:
                 if verbose:
                     print(f"  [WARN] Failed to remove old embeddings from FAISS: {e}")
+        
+        # Update index metadata only when FAISS is successfully updated
+        if faiss_add_succeeded and store._faiss_index:
+            with store._connect() as conn:
+                cur = conn.cursor()
+                store._write_index_meta(cur, now_iso)
+        
+        # If FAISS add failed, attempt to restore DB state so old chunks remain active
+        if store._faiss_index and not faiss_add_succeeded:
+            with store._connect() as conn:
+                cur = conn.cursor()
+                if old_chunk_ids:
+                    placeholders_old = ','.join(['?'] * len(old_chunk_ids))
+                    cur.execute(f"UPDATE chunks SET deleted = 0 WHERE id IN ({placeholders_old})", old_chunk_ids)
+                if chunk_ids:
+                    placeholders_new = ','.join(['?'] * len(chunk_ids))
+                    cur.execute(f"UPDATE chunks SET deleted = 1 WHERE id IN ({placeholders_new})", chunk_ids)
+                cur.execute(
+                    "UPDATE documents SET chunk_strategy = ?, chunk_version = ? WHERE id = ?",
+                    (original_chunk_strategy, original_chunk_version, doc_id)
+                )
+            stats['error'] = faiss_error or 'FAISS update failed'
+            return stats
         
         stats['success'] = True
         if verbose:

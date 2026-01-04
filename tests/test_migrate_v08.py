@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 
 import faiss
+import pytest
 import numpy as np
 
 # Add scripts directory to path
@@ -466,6 +467,75 @@ def test_migration_aborts_without_embeddings():
             cur.execute("SELECT chunk_version FROM documents WHERE id = ?", (doc_id,))
             version = cur.fetchone()['chunk_version']
             assert version is None, "Document should not be marked as migrated when embeddings fail"
+
+
+def test_faiss_add_failure_restores_db_and_vectors(monkeypatch):
+    """FAISS add failure should leave DB/state intact and keep old vectors."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, Message, Role, cfg = make_store(tmp)
+        
+        # Seed data
+        msgs = [
+            Message(content="Old message 1", role=Role.USER),
+            Message(content="Old message 2", role=Role.ASSISTANT),
+        ]
+        store.add_messages(msgs)
+        
+        # Simulate legacy data
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE documents SET chunk_version = NULL")
+        
+        # Capture baseline counts and metadata
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id, chunk_strategy, chunk_version FROM documents LIMIT 1")
+            row = cur.fetchone()
+            doc_id = row['id']
+            original_strategy = row['chunk_strategy']
+            original_version = row['chunk_version']
+            
+            cur.execute("SELECT COUNT(*) as cnt FROM chunks WHERE document_id = ? AND deleted = 0", (doc_id,))
+            old_active = cur.fetchone()['cnt']
+            
+            cur.execute("SELECT last_sync_ts FROM vector_index_meta WHERE id = 1")
+            meta_row = cur.fetchone()
+            prev_sync = meta_row['last_sync_ts'] if meta_row else None
+        
+        # Force FAISS add to fail
+        def fail_add(ids, vectors):
+            raise RuntimeError("simulated add failure")
+        
+        monkeypatch.setattr(store._faiss_index, "add", fail_add)
+        
+        from migrate_v08 import migrate_document
+        
+        stats = migrate_document(store, doc_id, 'chat', verbose=True, dry_run=False)
+        assert not stats['success']
+        assert "simulated add failure" in stats['error']
+        
+        # Old chunks remain active; new chunks are not left active
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) as cnt FROM chunks WHERE document_id = ? AND deleted = 0", (doc_id,))
+            active_after = cur.fetchone()['cnt']
+            assert active_after == old_active, f"Expected {old_active} active chunks, got {active_after}"
+            
+            # Ensure doc chunk flags were restored
+            cur.execute("SELECT chunk_strategy, chunk_version FROM documents WHERE id = ?", (doc_id,))
+            doc_row = cur.fetchone()
+            assert doc_row['chunk_strategy'] == original_strategy
+            assert doc_row['chunk_version'] == original_version
+            
+            # last_sync_ts should not advance on failure
+            cur.execute("SELECT last_sync_ts FROM vector_index_meta WHERE id = 1")
+            meta_row = cur.fetchone()
+            after_sync = meta_row['last_sync_ts'] if meta_row else None
+            assert after_sync == prev_sync
+        
+        # FAISS index should retain old vectors (count unchanged)
+        idx = faiss.read_index(str(cfg.INDEX_PATH))
+        assert idx.ntotal == old_active
 
 
 if __name__ == '__main__':
