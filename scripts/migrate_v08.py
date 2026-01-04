@@ -178,7 +178,7 @@ def migrate_document(
         # Embed all chunks
         chunk_texts = [c.text for c in chunks]
         embeddings = None
-        if store.embedder and store._faiss_index:
+        if store.embedder:
             try:
                 embeddings = store.embedder.embed(chunk_texts)
                 if verbose:
@@ -189,11 +189,12 @@ def migrate_document(
                 stats['error'] = f'Embedding failed: {e}'
                 return stats
         
-        # Abort migration if embeddings are required but not available
-        if store._faiss_index and embeddings is None:
+        # Always abort migration if embeddings are not available
+        # This prevents migrating documents without dense search capability
+        if embeddings is None:
             stats['error'] = 'Embeddings required but not available'
             if verbose:
-                print(f"  [ERROR] Cannot migrate without embeddings when FAISS index is enabled")
+                print(f"  [ERROR] Cannot migrate without embeddings")
             return stats
         
         now_iso = datetime.now(UTC).isoformat()
@@ -269,12 +270,8 @@ def migrate_document(
                 )
                 chunk_ids.append(cur.lastrowid)
             
-            # Add embeddings to FAISS and update chunk embedding_ids
-            if embeddings is not None and store._faiss_index:
-                # CORRECT: ids first, then vectors
-                store._faiss_index.add(chunk_ids, embeddings)
-                
-                # Update embedding_id for all chunks
+            # Update embedding_id for all chunks (but don't add to FAISS yet)
+            if embeddings is not None:
                 for chunk_id in chunk_ids:
                     cur.execute(
                         "UPDATE chunks SET embedding_id = ? WHERE id = ?",
@@ -282,10 +279,8 @@ def migrate_document(
                     )
                 
                 # Write index metadata
-                store._write_index_meta(cur, now_iso)
-                
-                if verbose:
-                    print(f"  Added {len(chunk_ids)} embeddings to FAISS")
+                if store._faiss_index:
+                    store._write_index_meta(cur, now_iso)
             
             # Only after successful embedding and DB inserts: soft-delete OLD chunks specifically
             # Use the old_chunk_ids list to avoid deleting newly created chunks
@@ -304,6 +299,20 @@ def migrate_document(
                 """,
                 (chunk_strategy, doc_id)
             )
+        
+        # Only after successful DB commit: add new embeddings to FAISS
+        # This ensures if commit fails, FAISS won't have orphaned vectors
+        if embeddings is not None and store._faiss_index:
+            try:
+                store._faiss_index.add(chunk_ids, embeddings)
+                if verbose:
+                    print(f"  Added {len(chunk_ids)} embeddings to FAISS")
+            except Exception as e:
+                # If FAISS add fails after commit, we have a problem
+                # Log the error but don't fail the migration since DB is committed
+                if verbose:
+                    print(f"  [WARN] Failed to add embeddings to FAISS after commit: {e}")
+                    print(f"  [WARN] Database updated but FAISS may be out of sync")
         
         # Only after successful DB commit: remove old embeddings from FAISS
         # This ensures FAISS and DB stay in sync
