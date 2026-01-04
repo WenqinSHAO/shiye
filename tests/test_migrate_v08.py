@@ -419,6 +419,55 @@ def test_timestamps_preserved():
         assert new_event == original_event, f"event_at should be preserved: expected {original_event}, got {new_event}"
 
 
+def test_migration_aborts_without_embeddings():
+    """Test that migration aborts when embeddings are required but not available."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, Message, Role, cfg = make_store(tmp)
+        
+        # Add messages
+        msgs = [Message(content="Test message", role=Role.USER)]
+        store.add_messages(msgs)
+        
+        # Get document ID
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM documents LIMIT 1")
+            doc_id = cur.fetchone()['id']
+            
+            # Count old chunks
+            cur.execute("SELECT COUNT(*) as cnt FROM chunks WHERE document_id = ? AND deleted = 0", (doc_id,))
+            old_count = cur.fetchone()['cnt']
+        
+        # Clear chunk_version to simulate old data
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE documents SET chunk_version = NULL")
+        
+        # Remove embedder to simulate missing embeddings
+        store.embedder = None
+        
+        from migrate_v08 import migrate_document
+        
+        # Attempt migration without embedder - should fail
+        stats = migrate_document(store, doc_id, 'chat', verbose=True, dry_run=False)
+        
+        # Migration should have failed
+        assert not stats['success'], "Migration should fail without embeddings"
+        assert 'Embeddings required but not available' in stats['error']
+        
+        # Old chunks should still be active (not deleted)
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) as cnt FROM chunks WHERE document_id = ? AND deleted = 0", (doc_id,))
+            current_count = cur.fetchone()['cnt']
+            assert current_count == old_count, f"Old chunks should remain active, expected {old_count}, got {current_count}"
+            
+            # Document should NOT be marked as migrated
+            cur.execute("SELECT chunk_version FROM documents WHERE id = ?", (doc_id,))
+            version = cur.fetchone()['chunk_version']
+            assert version is None, "Document should not be marked as migrated when embeddings fail"
+
+
 if __name__ == '__main__':
     # Run tests
     test_normalize_chunk_strategy()
@@ -447,5 +496,8 @@ if __name__ == '__main__':
     
     test_timestamps_preserved()
     print("✓ test_timestamps_preserved")
+    
+    test_migration_aborts_without_embeddings()
+    print("✓ test_migration_aborts_without_embeddings")
     
     print("\n✓ All tests passed!")

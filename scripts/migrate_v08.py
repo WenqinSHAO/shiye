@@ -184,44 +184,30 @@ def migrate_document(
                 if verbose:
                     print(f"  Generated embeddings: {embeddings.shape}")
             except Exception as e:
-                print(f"  [WARN] Embedding failed: {e}")
+                if verbose:
+                    print(f"  [ERROR] Embedding failed: {e}")
+                stats['error'] = f'Embedding failed: {e}'
+                return stats
+        
+        # Abort migration if embeddings are required but not available
+        if store._faiss_index and embeddings is None:
+            stats['error'] = 'Embeddings required but not available'
+            if verbose:
+                print(f"  [ERROR] Cannot migrate without embeddings when FAISS index is enabled")
+            return stats
         
         now_iso = datetime.now(UTC).isoformat()
         
         # Normalize chunk strategy
         chunk_strategy = normalize_chunk_strategy(type(chunker).__name__)
         
+        # Get old embedding IDs that need to be removed from FAISS
+        # Also store old chunk IDs for selective soft-delete
+        old_chunk_ids = [row['id'] for row in old_chunks]
+        old_embedding_ids = [row['embedding_id'] for row in old_chunks if row['embedding_id'] is not None]
+        
         with store._connect() as conn:
             cur = conn.cursor()
-            
-            # Remove old chunk embeddings from FAISS index before soft-deleting
-            old_embedding_ids = [row['embedding_id'] for row in old_chunks if row['embedding_id'] is not None]
-            if old_embedding_ids and store._faiss_index:
-                try:
-                    ids_to_remove = np.array(old_embedding_ids, dtype='int64')
-                    store._faiss_index.index.remove_ids(ids_to_remove)
-                    store._faiss_index.persist()
-                    if verbose:
-                        print(f"  Removed {len(old_embedding_ids)} old embeddings from FAISS")
-                except Exception as e:
-                    if verbose:
-                        print(f"  [WARN] Failed to remove old embeddings from FAISS: {e}")
-            
-            # Mark old chunks as deleted (soft delete)
-            cur.execute(
-                "UPDATE chunks SET deleted = 1 WHERE document_id = ? AND deleted = 0",
-                (doc_id,)
-            )
-            
-            # Update document with chunk strategy
-            cur.execute(
-                """
-                UPDATE documents 
-                SET chunk_strategy = ?, chunk_version = 1
-                WHERE id = ?
-                """,
-                (chunk_strategy, doc_id)
-            )
             
             # Get document metadata for tags
             cur.execute("SELECT tags FROM documents WHERE id = ?", (doc_id,))
@@ -233,9 +219,8 @@ def migrate_document(
                 except:
                     pass
             
-            # Map old chunks to new chunks to preserve metadata
-            # For chat docs, order is preserved (1:1 mapping by seq)
-            # For other docs, we use the first old chunk's metadata for all new chunks
+            # Insert new chunks first (before deleting old ones)
+            # This ensures we can roll back if anything fails
             chunk_ids = []
             for i, chunk in enumerate(chunks):
                 # Determine which old chunk to use for metadata
@@ -284,7 +269,7 @@ def migrate_document(
                 )
                 chunk_ids.append(cur.lastrowid)
             
-            # Add embeddings to FAISS in batch with correct parameter order
+            # Add embeddings to FAISS and update chunk embedding_ids
             if embeddings is not None and store._faiss_index:
                 # CORRECT: ids first, then vectors
                 store._faiss_index.add(chunk_ids, embeddings)
@@ -301,6 +286,38 @@ def migrate_document(
                 
                 if verbose:
                     print(f"  Added {len(chunk_ids)} embeddings to FAISS")
+            
+            # Only after successful embedding and DB inserts: soft-delete OLD chunks specifically
+            # Use the old_chunk_ids list to avoid deleting newly created chunks
+            if old_chunk_ids:
+                placeholders = ','.join('?' * len(old_chunk_ids))
+                cur.execute(
+                    f"UPDATE chunks SET deleted = 1 WHERE id IN ({placeholders})",
+                    old_chunk_ids
+                )
+            
+            # Update document with chunk strategy
+            cur.execute(
+                """
+                UPDATE documents 
+                SET chunk_strategy = ?, chunk_version = 1
+                WHERE id = ?
+                """,
+                (chunk_strategy, doc_id)
+            )
+        
+        # Only after successful DB commit: remove old embeddings from FAISS
+        # This ensures FAISS and DB stay in sync
+        if old_embedding_ids and store._faiss_index:
+            try:
+                ids_to_remove = np.array(old_embedding_ids, dtype='int64')
+                store._faiss_index.index.remove_ids(ids_to_remove)
+                store._faiss_index.persist()
+                if verbose:
+                    print(f"  Removed {len(old_embedding_ids)} old embeddings from FAISS")
+            except Exception as e:
+                if verbose:
+                    print(f"  [WARN] Failed to remove old embeddings from FAISS: {e}")
         
         stats['success'] = True
         if verbose:
