@@ -34,6 +34,7 @@ from chunking import (
 from config import DB_PATH, DATA_DIR, MODEL_NAME
 from datatypes import Role
 from embeddings import EmbeddingProvider
+from chunking_utils import get_embedding_max_tokens, normalize_chunk_strategy
 from storage import LocalStore
 from vector_store import FaissIndex
 
@@ -61,47 +62,6 @@ chunk_version IS NULL
 """
 
 NORMALIZED_STRATEGIES = {'header-aware', 'sentence-window', 'fixed-token', 'per-message', 'single-chunk'}
-
-
-def get_embedding_max_tokens(embedder) -> Optional[int]:
-    """Infer the maximum token length supported by the embedder/model."""
-    max_tokens = None
-    
-    # Prefer embedder model hints
-    model = getattr(embedder, "model", None) if embedder else None
-    if model:
-        try:
-            if hasattr(model, "get_max_seq_length"):
-                max_tokens = model.get_max_seq_length()
-        except Exception:
-            max_tokens = None
-        if max_tokens is None:
-            max_tokens = getattr(model, "max_seq_length", None)
-    
-    # Fallback to tokenizer config from chunking module
-    if not max_tokens:
-        try:
-            from chunking import _get_tokenizer
-            
-            tok = _get_tokenizer()
-            if tok not in (None, "fallback"):
-                max_tokens = getattr(tok, "model_max_length", None) or getattr(tok, "max_len_single_sentence", None)
-                # Ignore absurdly large sentinel values
-                if max_tokens and max_tokens > 100000:
-                    max_tokens = None
-        except Exception:
-            max_tokens = None
-    
-    try:
-        max_tokens = int(max_tokens) if max_tokens else None
-    except Exception:
-        max_tokens = None
-    
-    # Sensible default for MiniLM-class models
-    if not max_tokens or max_tokens <= 0:
-        max_tokens = 512
-    
-    return max_tokens
 
 
 def enforce_embedding_token_limit(chunks: List[Chunk], max_tokens: int) -> List[tuple[Chunk, int]]:
@@ -210,27 +170,6 @@ def enforce_embedding_token_limit(chunks: List[Chunk], max_tokens: int) -> List[
             seq += 1
     
     return limited_chunks
-
-
-def normalize_chunk_strategy(chunker_class_name: str) -> str:
-    """Normalize chunk strategy name to match storage.py conventions.
-    
-    Args:
-        chunker_class_name: Class name like 'HeaderAwareChunker', 'MessageChunker', etc.
-        
-    Returns:
-        Normalized strategy name: 'header-aware', 'sentence-window', 'fixed-token', or 'per-message'
-    """
-    strategy = chunker_class_name.replace('Chunker', '').lower()
-    if 'headeraware' in strategy:
-        return 'header-aware'
-    elif 'sentencewindow' in strategy:
-        return 'sentence-window'
-    elif 'fixedtoken' in strategy:
-        return 'fixed-token'
-    elif 'message' in strategy:
-        return 'per-message'
-    return strategy
 
 
 def expected_strategy_for_doc_type(doc_type: Optional[str]) -> Optional[str]:

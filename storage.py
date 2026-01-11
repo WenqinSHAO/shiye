@@ -31,6 +31,7 @@ import numpy as np
 from config import DATA_DIR, DB_PATH, MODEL_NAME
 from datatypes import Message, Role, ensure_utc
 from chunking import Chunk, HeaderAwareChunker, count_tokens, _get_tokenizer
+from chunking_utils import get_embedding_max_tokens, normalize_chunk_strategy
 from embeddings import EmbeddingProvider
 from vector_store import FaissIndex, faiss
 from retrieval import SearchRequest, Candidate, Reranker, RecencyBooster, TypeBooster, ExactMatchBooster, Deduplicator
@@ -466,29 +467,11 @@ class LocalStore:
 
     def _get_embedding_max_tokens(self) -> Optional[int]:
         """Best-effort detection of the embedder's max token length."""
-        if not self.embedder:
-            return None
-        model = getattr(self.embedder, "model", None)
-        if model is None:
-            return None
-        max_tokens = None
-        try:
-            max_tokens = getattr(model, "max_seq_length", None)
-        except Exception:
-            max_tokens = None
-        if not max_tokens:
-            try:
-                tok = getattr(model, "tokenizer", None)
-                max_tokens = getattr(tok, "model_max_length", None) or getattr(tok, "max_len_single_sentence", None)
-            except Exception:
-                max_tokens = None
-        try:
-            max_tokens = int(max_tokens) if max_tokens else None
-        except Exception:
-            max_tokens = None
-        if max_tokens and 0 < max_tokens < 100000:
-            return max_tokens
-        return None
+        return get_embedding_max_tokens(
+            self.embedder,
+            default=None,
+            use_chunking_tokenizer=False,
+        )
 
     def _split_chunk_for_limit(self, chunk: Chunk, max_tokens: int) -> List[Chunk]:
         """Split a chunk into sub-chunks that respect the embedder's token limit."""
@@ -975,15 +958,7 @@ class LocalStore:
         now_iso = datetime.now(UTC).isoformat()
         
         # Determine chunk strategy based on chunker type
-        chunk_strategy = type(chunker).__name__.replace('Chunker', '').lower()
-        if 'headeraware' in chunk_strategy:
-            chunk_strategy = 'header-aware'
-        elif 'sentencewindow' in chunk_strategy:
-            chunk_strategy = 'sentence-window'
-        elif 'fixedtoken' in chunk_strategy:
-            chunk_strategy = 'fixed-token'
-        elif 'message' in chunk_strategy:
-            chunk_strategy = 'per-message'
+        chunk_strategy = normalize_chunk_strategy(type(chunker).__name__)
         
         document_meta["chunk_strategy"] = chunk_strategy
         document_meta["chunk_version"] = 1
