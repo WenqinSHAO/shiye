@@ -221,10 +221,12 @@ def index() -> HTMLResponse:
             .hit-doc-legend { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--subtle); margin-top: 8px; flex-wrap: wrap; }
             .legend-item { display: inline-flex; align-items: center; gap: 6px; }
             .legend-swatch { width: 14px; height: 14px; border-radius: 4px; border: 1px solid var(--border); display: inline-block; box-sizing: border-box; }
-            .legend-primary { background: #fff4d6; border-color: #f6c76a; box-shadow: inset 0 0 0 1px rgba(246,199,106,0.25); }
-            .legend-secondary { background: #e8f1ff; border-color: #c8dcff; }
-            .doc-highlight-main { background: #fff4d6; border: 1px solid #f6c76a; box-shadow: inset 0 0 0 1px rgba(246,199,106,0.28); border-radius: 4px; padding: 1px 2px; }
-            .doc-highlight-secondary { background: #e8f1ff; border: 1px solid #c8dcff; border-radius: 4px; padding: 1px 2px; }
+            .legend-primary { background: #fef3c7; border-color: #fcd34d; }
+            .legend-secondary { background: #93c5fd; border-color: #3b82f6; }
+            .legend-boundary { background: #f1f5f9; border-color: #cbd5e1; }
+            .chunk-boundary { display: inline-block; font-size: 10px; font-weight: 600; padding: 2px 6px; margin: 0 6px 0 0; border-radius: 4px; background: #f1f5f9; color: #64748b; border: 1px solid #cbd5e1; white-space: nowrap; vertical-align: middle; }
+            .chunk-boundary.is-shortlisted { background: #93c5fd; color: #1e3a8a; border-color: #3b82f6; }
+            .chunk-boundary.is-primary { background: #fef3c7; color: #92400e; border-color: #fcd34d; font-weight: 700; }
             .hit-scores { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 8px; }
             .hit-score-chips, .score-chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
             .score-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 8px; background: #eef3ff; border: 1px solid var(--border); font-size: 12px; color: var(--ink); }
@@ -598,71 +600,131 @@ def index() -> HTMLResponse:
                         return escapeHtml(src).replace(/\\n/g, "<br>");
                     }
                 };
-                if (!shortIds.size) {
-                    return renderMarkdown(text);
-                }
                 const primaryId = Number(primaryChunkId);
+                const textLen = text.length;
                 const ranges = [];
-                let fallbackCursor = 0;
+                let searchCursor = 0;
+                const findSnippetRange = (snippet, preferFrom = 0) => {
+                    if (!snippet) return null;
+                    const hits = [];
+                    let from = Math.max(0, preferFrom);
+                    while (from <= textLen) {
+                        const idx = text.indexOf(snippet, from);
+                        if (idx === -1) break;
+                        hits.push({ start: idx, end: idx + snippet.length });
+                        from = idx + 1;
+                    }
+                    if (!hits.length) return null;
+                    if (!Number.isFinite(preferFrom)) return hits[0];
+                    const target = Math.max(0, preferFrom);
+                    hits.sort((a, b) => Math.abs(a.start - target) - Math.abs(b.start - target));
+                    return hits[0];
+                };
+                const clampRange = (start, end) => {
+                    const s = Math.max(0, Math.min(Number.isFinite(start) ? start : 0, textLen));
+                    const e = Math.max(s, Math.min(Number.isFinite(end) ? end : textLen));
+                    return { start: s, end: e };
+                };
                 (docChunks || []).forEach((chunk) => {
                     const cid = Number(chunk.id);
-                    if (!shortIds.has(cid)) return;
+                    if (!Number.isFinite(cid)) return;
+                    const snippet = typeof chunk.text === "string" ? chunk.text : "";
                     let start = Number(chunk.char_start);
                     let end = Number(chunk.char_end);
-                    const hasStart = Number.isFinite(start);
-                    const hasEnd = Number.isFinite(end);
-                    if (!hasStart || !hasEnd || end < start) {
-                        const snippet = chunk.text || "";
-                        if (!snippet) return;
-                        let found = text.indexOf(snippet, fallbackCursor);
-                        if (found === -1) found = text.indexOf(snippet);
-                        if (found === -1) return;
-                        start = found;
-                        end = found + snippet.length;
-                        fallbackCursor = end;
+                    const hasPositions = Number.isFinite(start) && Number.isFinite(end) && end > start;
+                    
+                    // If we have valid positions, use them even if text is empty
+                    if (hasPositions) {
+                        ({ start, end } = clampRange(start, end));
+                    } else {
+                        // Only skip if there's no text AND no valid positions
+                        if (!snippet || !snippet.trim()) return;
+                        const located = findSnippetRange(snippet, searchCursor);
+                        if (!located) return;
+                        start = located.start;
+                        end = located.end;
                     }
-                    start = Math.max(0, Math.min(start, text.length));
-                    end = Math.max(start, Math.min(end, text.length));
-                    ranges.push({ start, end, id: cid, isPrimary: cid === primaryId });
+                    ({ start, end } = clampRange(start, end));
+                    // Skip parent/meta chunk that spans almost the whole document.
+                    if (start <= 0 && end >= textLen * 0.98) {
+                        return;
+                    }
+                    if (start >= end) return;
+                    ranges.push({
+                        start,
+                        end,
+                        id: cid,
+                        seq: Number(chunk.seq),
+                        isPrimary: cid === primaryId,
+                        isShortlisted: shortIds.has(cid),
+                        snippet: snippet,  // Store snippet for later use
+                    });
+                    // Advance search cursor so snippet fallbacks prefer forward progress.
+                    searchCursor = Math.max(searchCursor, end);
                 });
                 ranges.sort((a, b) => {
                     if (a.start === b.start) return a.end - b.end;
                     return a.start - b.start;
                 });
+                // Clamp overlong ranges to the start of the next chunk to avoid swallowing children when offsets overshoot.
+                for (let i = 0; i < ranges.length - 1; i++) {
+                    const cur = ranges[i];
+                    const next = ranges[i + 1];
+                    if (next && Number.isFinite(next.start) && cur.end > next.start) {
+                        cur.end = Math.max(cur.start, next.start);
+                        // Keep snippet length if we clamped to zero.
+                        if (cur.end === cur.start && cur.snippet && cur.snippet.length > 0) {
+                            cur.end = Math.min(textLen, cur.start + cur.snippet.length);
+                        }
+                    }
+                }
                 const normalized = [];
-                let cursor = 0;
                 ranges.forEach((r) => {
-                    if (r.end <= cursor) return;
-                    const start = Math.max(r.start, cursor);
-                    const end = r.end;
-                    if (start >= end) return;
-                    normalized.push({ ...r, start, end });
-                    cursor = end;
+                    if (r.start >= r.end) return;
+                    const last = normalized[normalized.length - 1];
+                    if (last && last.start === r.start && last.end === r.end && last.id === r.id) return;
+                    normalized.push(r);
                 });
-                if (!normalized.length) {
+                // Filter out obvious parents that fully enclose multiple children with same doc span.
+                const spansFullDoc = normalized.filter((r) => r.start <= 0 && r.end >= textLen - 1);
+                const skipIds = new Set(spansFullDoc.map((r) => r.id));
+                const filtered = normalized.filter((r) => !skipIds.has(r.id));
+                if (!filtered.length) {
                     return renderMarkdown(text);
                 }
-                const markers = [];
+                // Insert compact visual markers at chunk start positions only
+                // Next chunk start (or end of doc) implicitly marks where previous chunk ends
                 let annotated = text;
-                for (let i = normalized.length - 1; i >= 0; i--) {
-                    const r = normalized[i];
-                    const key = `H${i}_${r.id}_${r.isPrimary ? "P" : "S"}`;
-                    const tokenStart = `<!--${key}_START-->`;
-                    const tokenEnd = `<!--${key}_END-->`;
-                    r.tokenStart = tokenStart;
-                    r.tokenEnd = tokenEnd;
-                    markers.push({ key, id: r.id, isPrimary: r.isPrimary });
-                    annotated = `${annotated.slice(0, r.end)}${tokenEnd}${annotated.slice(r.end)}`;
-                    annotated = `${annotated.slice(0, r.start)}${tokenStart}${annotated.slice(r.start)}`;
-                }
-                let html = renderMarkdown(annotated);
-                markers.forEach((m) => {
-                    const startTag = `<span class="${m.isPrimary ? "doc-highlight-main" : "doc-highlight-secondary"}" data-chunk-id="${m.id}">`;
-                    const endTag = "</span>";
-                    html = html.split(`<!--${m.key}_START-->`).join(startTag);
-                    html = html.split(`<!--${m.key}_END-->`).join(endTag);
+                
+                // Sort ranges by position, process in reverse to maintain position validity
+                const sortedRanges = [...filtered].sort((a, b) => {
+                    if (a.start !== b.start) return a.start - b.start;
+                    return a.end - b.end;
                 });
-                return html;
+                
+                // Insert markers from end to start to preserve positions
+                for (let i = sortedRanges.length - 1; i >= 0; i--) {
+                    const r = sortedRanges[i];
+                    const chunkLabel = Number.isFinite(r.seq) ? `#${r.seq}` : `${r.id}`;
+                    const fullLabel = Number.isFinite(r.seq) ? `chunk #${r.seq}` : `chunk ${r.id}`;
+                    
+                    // Build CSS classes for styling
+                    const classes = ["chunk-boundary"];
+                    if (r.isShortlisted) classes.push("is-shortlisted");
+                    if (r.isPrimary) classes.push("is-primary");
+                    
+                    // Create compact visual marker
+                    const marker = `<span class="${classes.join(" ")}" data-chunk-id="${r.id}" data-chunk-seq="${Number.isFinite(r.seq) ? r.seq : ""}" title="${fullLabel}">${chunkLabel}</span>`;
+                    
+                    // Clamp position to text length
+                    const start = Math.max(0, Math.min(r.start, annotated.length));
+                    
+                    // Insert marker at start position
+                    annotated = annotated.slice(0, start) + marker + annotated.slice(start);
+                }
+                
+                // Render markdown with boundary markers embedded
+                return renderMarkdown(annotated);
             }
 
             async function loadDocumentForHit(hitEl) {
@@ -2223,7 +2285,8 @@ def chat(payload=Body(...)) -> dict:
                     hit_parts.append(
                         "<div class='hit-doc-legend'>"
                         "<span class='legend-item'><span class='legend-swatch legend-primary'></span>This result</span>"
-                        "<span class='legend-item'><span class='legend-swatch legend-secondary'></span>Other matches in this document</span>"
+                        "<span class='legend-item'><span class='legend-swatch legend-secondary'></span>Other matches</span>"
+                        "<span class='legend-item'><span class='legend-swatch legend-boundary'></span>All chunks</span>"
                         "</div>"
                     )
                     hit_parts.append("</div>")  # end doc view

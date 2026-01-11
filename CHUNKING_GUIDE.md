@@ -121,6 +121,16 @@ RSS summaries are typically stored as single chunks since they're already concis
 3. Preserves semantic coherence via structure-aware splitting
 4. Better for hybrid search (BM25 + dense retrieval)
 
+## Known Issues / Future Fixes
+
+- **Chinese notes can fragment mid-sentence.** With `HeaderAwareChunker(max_tokens=300)` and `all-MiniLM-L6-v2`, Chinese tokens are often ~1 char each. Sections longer than ~300 chars (e.g., note “十块钱的“夜行灯”，怎么藏着一整套红外科学与工程史”, doc_id=29) are split by the fixed-token fallback, producing short chunks (e.g., chunk id 504: “因为“人-背景”的红外对比度变小，信号幅度下降，等效探测距离缩短、漏检概率上升。很多工程”) that do not align to sentence boundaries. This shows up in document view highlights for `/find` as tiny spans.
+- **Planned mitigations (requires re-chunking affected docs):** Increase note chunk size and add overlap (e.g., ~480–512 tokens with ~40 overlap), or add a sentence-aware split inside the header-aware chunker (or switch notes to a sentence-window path for sub-800 char sections). Keep short sections intact; only long sections should be split. Re-ingest/re-chunk is needed to update existing data.
+- **Doc-view highlight wraps collapse when chunks span block elements.** For note doc_id=11 (“Thought Communication in Multiagent Collaboration”), chunk id 175 (`## 分类/标签` + tag line) highlights only the header in document view. The chunk itself is short and relevant (contains “Representation Learning”, “Multi-Agent”), so retrieval is expected; the visual issue is our marker-based highlight wrapping block elements with inline spans, which browsers normalize by closing the span before the block. Future fix: use block-safe wrappers (e.g., wrap per-block or use CSS overlays) and/or avoid chunking tiny header+tag sections into standalone chunks.
+- **Troubleshooting the doc-view collapse (same example, chunk 175):**
+  - The chunk boundary is correct: `char_start=378`, `char_end=539`, covering the full heading and tag line in `raw_content`.
+  - Rendering pipeline: we inject `<!--H*_START-->`/`<!--H*_END-->` markers, parse with `marked`, then swap markers for `<span class="doc-highlight-*">`. When a marker wraps multiple block elements (e.g., an `h2` + following paragraph), the generated HTML becomes `<span><h2>...</h2><p>...</p></span>`, which is invalid; the browser implicitly closes the span before the block, so only the first inline fragment ends up highlighted.
+  - Candidate fixes to implement later: (1) after parsing, detect markers and wrap block boundaries with block-safe containers (e.g., `<div class="doc-highlight-main">` when the range spans block elements); (2) split highlights per block by inserting markers inside each block’s text rather than around the entire cross-block range; (3) DOM-based range highlighting after render (walk the text nodes that fall in the chunk range and wrap them individually), which avoids invalid nesting at the cost of more code.
+
 ## Metadata Tracking
 
 Each chunk stores:
