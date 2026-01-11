@@ -456,9 +456,22 @@ def migrate_document(
         
         content_missing = content is None or (isinstance(content, str) and not content.strip()) or (isinstance(content, list) and len(content) == 0)
         if not old_chunks and content_missing:
+            # Even for empty documents, fix the strategy if it's wrong
+            expected_strategy = expected_strategy_for_doc_type(doc_type)
+            if expected_strategy and original_chunk_strategy != expected_strategy:
+                if not dry_run:
+                    with store._connect() as conn:
+                        cur = conn.cursor()
+                        cur.execute(
+                            "UPDATE documents SET chunk_strategy = ?, chunk_version = 1 WHERE id = ?",
+                            (expected_strategy, doc_id)
+                        )
+                    if verbose:
+                        print(f"  Fixed strategy from '{original_chunk_strategy}' to '{expected_strategy}'")
+            
             stats['success'] = True
             stats['skipped'] = True
-            stats['error'] = 'No content found - skipped'
+            stats['error'] = 'No content found - skipped (strategy corrected if needed)'
             if verbose:
                 print("  [SKIP] No chunks or raw content found; skipping")
             return stats
