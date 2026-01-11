@@ -137,7 +137,11 @@ def fetch_url_content(url: str, timeout: int = 10) -> Tuple[Optional[str], Optio
             resp.raise_for_status()
             content = resp.text
             if content and len(content.strip()) > 50:
-                return gh_raw.split("/")[-1] or url, content, "github_raw"
+                title = gh_raw.split("/")[-1] or url
+                combined = content
+                if title and title.strip() and title.strip() not in content[: len(title) + 10]:
+                    combined = f"{title.strip()}\n\n{content}"
+                return title, combined, "github_raw"
         except Exception:
             pass
 
