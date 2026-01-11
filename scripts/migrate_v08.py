@@ -375,6 +375,13 @@ def get_document_sources(
         elif chunks_meta:
             content = [row['text'] for row in chunks_meta]
             message_meta = [_chunk_row_to_meta(row, doc_tags) for row in chunks_meta]
+            def _safe_chunk_tags(value: Optional[str]) -> dict:
+                if not value:
+                    return doc_tags or {}
+                try:
+                    return json.loads(value)
+                except Exception:
+                    return doc_tags or {}
             # Build raw_content from existing chunks so we persist a source copy
             raw_content = json.dumps([
                 {
@@ -382,7 +389,7 @@ def get_document_sources(
                     "role": row['role'],
                     "created_at": row['created_at'],
                     "event_at": row['event_at'],
-                    "tags": json.loads(row['tags']) if row['tags'] else doc_tags,
+                    "tags": _safe_chunk_tags(row['tags']),
                     "focus_hint": row['focus_hint'],
                 }
                 for row in chunks_meta
