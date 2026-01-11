@@ -130,7 +130,7 @@ def index() -> HTMLResponse:
             details.debug-block { margin-top: 8px; border: 1px dashed var(--border); border-radius: 8px; background: #f9fbff; }
             details.debug-block summary { padding: 8px 10px; cursor: pointer; color: var(--subtle); font-size: 12px; }
             details.debug-block pre { margin: 0; padding: 8px 10px 10px; font-size: 12px; background: transparent; color: #0f172a; overflow-x: auto; }
-            #history-wrapper { display: none; height: 100%; min-width: 240px; max-width: 520px; position: relative; min-height: 0; }
+            #history-wrapper { display: none; height: 100%; min-width: 240px; max-width: 520px; width: 360px; position: relative; min-height: 0; }
             body.show-history #history-wrapper { display: flex; }
             #history-panel { width: 100%; height: 100%; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 2px 8px rgba(15, 23, 42, 0.05); display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
             #history-resize { width: 6px; cursor: col-resize; position: absolute; left: -4px; top: 0; bottom: 0; }
@@ -327,6 +327,10 @@ def index() -> HTMLResponse:
             const historyWrapper = document.getElementById('history-wrapper');
             const historyPanel = document.getElementById('history-panel');
             const historyResize = document.getElementById('history-resize');
+            const HISTORY_WIDTH_KEY = 'historyPanelWidth';
+            const HISTORY_MIN_WIDTH = 240;
+            const HISTORY_MAX_WIDTH = 520;
+            const HISTORY_DEFAULT_WIDTH = 360;
             const toastContainer = document.getElementById('toast-container');
             const noteShell = document.getElementById('note-shell');
             const noteList = document.getElementById('note-list');
@@ -340,6 +344,21 @@ def index() -> HTMLResponse:
             const noteStatus = document.getElementById('noteStatus');
             const noteRecovery = document.getElementById('note-recovery');
             const mathScript = document.getElementById('mathjax-script');
+            const getSavedHistoryWidth = () => {
+                const raw = localStorage.getItem(HISTORY_WIDTH_KEY);
+                if (!raw) return null;
+                const parsed = parseInt(raw, 10);
+                if (!Number.isFinite(parsed)) return null;
+                return Math.min(Math.max(parsed, HISTORY_MIN_WIDTH), HISTORY_MAX_WIDTH);
+            };
+            const applySavedHistoryWidth = () => {
+                if (!historyWrapper) return;
+                const saved = getSavedHistoryWidth();
+                const width = saved || HISTORY_DEFAULT_WIDTH;
+                const clamped = Math.min(Math.max(width, HISTORY_MIN_WIDTH), HISTORY_MAX_WIDTH);
+                historyWrapper.style.width = `${clamped}px`;
+            };
+            applySavedHistoryWidth();
             function normalizeLinkValue(val) {
                 if (typeof val === "string") return val;
                 if (!val) return "";
@@ -1493,6 +1512,7 @@ def index() -> HTMLResponse:
                 historyOpen = !historyOpen;
                 document.body.classList.toggle('show-history', historyOpen);
                 if (historyOpen) {
+                    applySavedHistoryWidth();
                     historyLoadedDays = {};
                     historyDayMeta = [];
                     openHistoryDays = new Set();
@@ -1514,14 +1534,18 @@ def index() -> HTMLResponse:
 
             function onResize(e) {
                 if (!isResizing || !historyWrapper) return;
-                const min = 240;
-                const max = 520;
                 const rect = historyWrapper.getBoundingClientRect();
-                const newWidth = Math.min(Math.max(rect.right - e.clientX, min), max);
+                const newWidth = Math.min(Math.max(rect.right - e.clientX, HISTORY_MIN_WIDTH), HISTORY_MAX_WIDTH);
                 historyWrapper.style.width = `${newWidth}px`;
             }
 
             function stopResize() {
+                if (isResizing && historyWrapper) {
+                    const rect = historyWrapper.getBoundingClientRect();
+                    const width = Math.round(rect.width);
+                    localStorage.setItem(HISTORY_WIDTH_KEY, String(width));
+                    historyWrapper.style.width = `${width}px`;
+                }
                 isResizing = false;
                 document.body.classList.remove('resizing');
             }
