@@ -18,10 +18,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
 from migrate_v08 import (
     MIGRATABLE_WHERE_CLAUSE,
     expected_strategy_for_doc_type,
-    get_embedding_max_tokens,
     should_migrate_doc,
 )
 from chunking import count_tokens
+from chunking_utils import get_embedding_max_tokens, normalize_chunk_strategy
 
 
 class FakeEmbedder:
@@ -66,8 +66,6 @@ def make_store(tmp_dir: str):
 
 def test_normalize_chunk_strategy():
     """Test chunk strategy normalization."""
-    from migrate_v08 import normalize_chunk_strategy
-    
     assert normalize_chunk_strategy('HeaderAwareChunker') == 'header-aware'
     assert normalize_chunk_strategy('SentenceWindowChunker') == 'sentence-window'
     assert normalize_chunk_strategy('FixedTokenChunker') == 'fixed-token'
