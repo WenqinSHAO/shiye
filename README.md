@@ -50,9 +50,22 @@ Environment variables:
 - `SHIYE_EMBED_MODEL` - Embedding model (default: `sentence-transformers/all-MiniLM-L6-v2`)
 - `SHIYE_MODEL_CACHE` - Model cache directory (default: `~/.shiye/models`)
 - `SHIYE_RERANKER` - Reranker to use: `flashrank` (default), `bge`, or `none`
-- `SHIYE_SEARCH_TOP_K` - Number of results to return (default: `20`)
+- `SHIYE_SEARCH_TOP_K` - Number of results to return (default: `5`)
+- `SHIYE_RERANK_TOP_K` - How many candidates to send to the reranker (default: `50`)
+- `SHIYE_RRF_K` - Reciprocal rank fusion constant (default: `60`)
 - `SHIYE_RECENCY_DECAY_DAYS` - Days for recency boost decay (default: `30`)
 - `SHIYE_DEBUG_RETRIEVAL` - Enable debug logging for retrieval pipeline (default: `false`)
+
+### Upgrading from v0.7
+
+1. **Back up data**: `python scripts/backup_restore.py backup`
+2. **Run the migration** (requires embeddings to be available):
+   ```bash
+   python scripts/migrate_v08.py --verbose        # migrate everything
+   python scripts/migrate_v08.py --dry-run -v     # preview only
+   python scripts/migrate_v08.py --doc-type note  # migrate a specific type
+   ```
+   The script re-chunks documents with the v0.8 strategies, sets `chunk_strategy/chunk_version`, writes `heading_path/page_number/parent_doc_seq`, and refreshes FAISS embeddings. See `scripts/README.md` for details.
 
 ## Features
 
@@ -87,6 +100,7 @@ Shiye v0.8 features a powerful hybrid search system with intelligent chunking:
   - **RSS**: Fixed-token or single-chunk strategies
 - Automatic chunking on ingestion with strategy/version tracking
 - Migration tool available: `scripts/migrate_v08.py`
+- Chunks carry heading/page/seq metadata; search hits render a chunk window with ±1 neighbor for context
 
 **Search Filters**:
 - `type:<doc_type>` - Filter by document type (note, web_page, chat, paper, rss_daily_summary)

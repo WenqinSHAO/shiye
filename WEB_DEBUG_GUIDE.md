@@ -20,6 +20,7 @@ or with filters:
 ```
 
 The debug panel will automatically appear below your search results when debug mode is enabled.
+See `DEBUG_RETRIEVAL_GUIDE.md` for the full pipeline breakdown and score component reference.
 
 ## What You'll See
 

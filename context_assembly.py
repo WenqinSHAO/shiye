@@ -82,34 +82,34 @@ def expand_chunks_with_neighbors(
                 
                 neighbors = cur.fetchall()
                 
-                # Build expanded text
-                texts = []
+                # Build expanded text, always anchoring on the core chunk
+                texts_before = []
+                texts_after = []
                 seq_before = []
                 seq_after = []
-                total_chars = 0
+                core_text = core_text or ""
+                total_chars = len(core_text)
                 
                 for neighbor in neighbors:
-                    neighbor_text = neighbor['text']
+                    neighbor_text = neighbor['text'] or ""
                     neighbor_seq = neighbor['seq']
                     
-                    # Check if adding this would exceed limit
-                    if total_chars + len(neighbor_text) > max_expansion_chars:
-                        # Skip this neighbor to stay within limits
-                        continue
-                    
-                    texts.append(neighbor_text)
-                    total_chars += len(neighbor_text)
-                    
                     if neighbor_seq < core_seq:
+                        if total_chars + len(neighbor_text) > max_expansion_chars:
+                            continue
+                        texts_before.append(neighbor_text)
                         seq_before.append(neighbor_seq)
+                        total_chars += len(neighbor_text)
                     elif neighbor_seq > core_seq:
+                        if total_chars + len(neighbor_text) > max_expansion_chars:
+                            continue
+                        texts_after.append(neighbor_text)
                         seq_after.append(neighbor_seq)
+                    else:
+                        # Core chunk: already accounted for in total_chars
+                        continue
                 
-                expanded_text = ' '.join(texts)
-                
-                # If expansion didn't include core text, ensure it's there
-                if core_seq not in [n['seq'] for n in neighbors]:
-                    expanded_text = core_text
+                expanded_text = ' '.join(texts_before + [core_text] + texts_after)
                 
                 expanded.append(ExpandedChunk(
                     chunk_id=chunk_id,

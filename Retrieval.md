@@ -1,16 +1,17 @@
 # Enhanced Retrieval Design for Shiye
 
-Status: v0.7 hybrid retrieval is shipped; chunking v0.8 is partly integrated (notes + chat), but retrieval/context wiring and ingestion coverage remain open.
+Status: v0.8 hybrid retrieval and chunked ingestion are live. Search uses dense + sparse + RRF with optional rerank, chunks carry structure metadata, and chat flow can reuse cached search context with token-aware packing. A migration script backfills legacy documents.
 
 ---
 
-## Retrieval Snapshot (v0.7)
+## Retrieval Snapshot (v0.8)
 
 - Hybrid pipeline: FAISS dense search + SQLite FTS5 BM25 fused with RRF; optional FlashRank/BGE rerankers; top-k and RRF constants configurable in `config.py`.
 - Multi-cue scoring: recency boost, document-type preferences, exact-match boost, and deduplication to keep the best chunk per document.
-- Schema/provenance: chunks carry `char_start`, `char_end`, `embedding_model`; `chunk_window` column exists but is empty today.
-- Interfaces: `/find` web command with filters and debug panel; `workspace.search()` returns `SearchHit` objects with `score_history`; `ContextPacker` available for token-budgeted context (not yet wired into chat flow).
+- Schema/provenance: chunks carry `char_start/char_end/heading_path/page_number/parent_doc_seq/embedding_model`; `chunk_window` is built on demand with ±1 neighbor for display/context.
+- Interfaces: `/find` web command with filters and debug panel; `workspace.search()` returns `SearchHit` objects with `score_history`; `ContextPacker` packs search hits for the LLM.
 - Storage: idempotent migrations, soft deletes, and FAISS index syncing keep retrieval consistent.
+- Migration: `scripts/migrate_v08.py` re-chunks legacy documents, normalizes `chunk_strategy/chunk_version`, fills metadata, and refreshes FAISS embeddings.
 
 ### Code Entry Points
 
@@ -22,12 +23,9 @@ Status: v0.7 hybrid retrieval is shipped; chunking v0.8 is partly integrated (no
 
 ## Current Gaps
 
-- ~~All v0.8 retrieval/UI wiring complete: chunk_window, ContextPacker with neighbors, search policy~~.
-- ~~Chat flow now uses search + ContextPacker with intelligent policy (skip/reuse/search)~~.
-- ~~Ingestion coverage: all document types use chunkers and set chunk_strategy/chunk_version~~.
-- ~~Note endpoints: UI notes automatically use chunked saves (header-aware)~~.
-- No migration/backfill tooling for legacy documents (pre-v0.8).
-- No golden-query evaluation harness; no UI notice for missing FTS5.
+- No golden-query evaluation harness; no UI notice for missing FTS5 builds.
+- Neighbor expansion beyond the lightweight `chunk_window` is available (`context_assembly.expand_chunks_with_neighbors`) but not yet wired into the chat packer.
+- FAISS rebuild on embedding-dimension change still relies on manual cleanup (index mismatch logs a warning and disables dense search).
 
 ## Chunking & Context (v0.8) – Where We Are
 
@@ -36,13 +34,13 @@ Status: v0.7 hybrid retrieval is shipped; chunking v0.8 is partly integrated (no
 - Notes: UI note endpoints use header-aware chunking by default; cumulative offsets; FAISS cleanup on updates.
 - Chat: per-message chunks with cumulative offsets; search + ContextPacker with intelligent policy (skip/reuse/search based on intent).
 - Schema/metadata: heading_path, page_number, parent_doc_seq, chunk_strategy, chunk_version populated.
-- Context assembly: ContextPacker uses chunk_window (includes neighbors); search policy prevents unconditional searches.
+- Context assembly: `build_chunk_window` provides ±1 neighbor for results; `ContextPacker` enforces token budgets for the LLM.
 - Retrieval: chunk_window populated during search; heading/page/seq in SearchHit and UI; neighbor-aware context in LLM.
-- Tests: 47+ tests pass; chunking, ingestion, context assembly, and search policy validated.
+- Migration: `scripts/migrate_v08.py` re-chunks/re-embeds legacy docs with normalized strategies.
+- Tests: retrieval, chunking, ingestion, and migration covered in `tests/`.
 
-**Still to do for v0.8**
-- ~~All retrieval, ingestion, context assembly, and search policy items~~ (done in current PR).
-- Provide migration/backfill tooling to re-chunk/re-embed legacy docs and fill strategy/heading metadata.
+**Still to do**
+- Expand neighbor-aware context beyond simple chunk windows.
 - Decide and document chat chunking policy (per-message default vs optional turn windows).
 - Optional refinements: improve search policy heuristics, add alignment filter post-fusion.
 

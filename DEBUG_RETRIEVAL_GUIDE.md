@@ -12,6 +12,7 @@ A concise guide to the retrieval debug tooling in Shiye. Use this when you need 
 2) **Pipeline Stats** — dense retrieved/after-filter counts, sparse and exact counts, fusion unique candidates, rerank coverage, post-processors applied, final count.
 3) **Score Chips on Every Result** — per-result badges for each score component (dense, sparse, exact, fused, rerank, recency_boost, type_boost, exact_match_boost, final).
 4) **Candidate Breakdown Panel** — top results with a stage-by-stage score list and text preview.
+*Search hits render a chunk window (±1 neighbor) so previews show a bit of surrounding context rather than isolated fragments.*
 
 ## Score Components Cheat Sheet
 - `dense`: FAISS semantic similarity (0–1).

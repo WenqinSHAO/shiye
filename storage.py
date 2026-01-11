@@ -968,11 +968,6 @@ class LocalStore:
         if max_tokens:
             chunks = self._enforce_chunk_token_limit(chunks, max_tokens)
         
-        # Enforce embedder token limit before embedding
-        max_tokens = self._get_embedding_max_tokens()
-        if max_tokens:
-            chunks = self._enforce_chunk_token_limit(chunks, max_tokens)
-        
         # Embed all chunks
         chunk_texts = [c.text for c in chunks]
         embeddings = self._maybe_embed(chunk_texts)

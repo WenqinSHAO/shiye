@@ -381,6 +381,19 @@ class HeaderAwareChunker:
         
         sections = []
         heading_stack = []  # Stack to track heading hierarchy
+
+        # Capture any preamble text before the first heading so we don't drop content
+        first_start = matches[0].start()
+        if first_start > 0:
+            preamble = text[:first_start]
+            if preamble.strip():
+                sections.append({
+                    'text': preamble,
+                    'char_start': 0,
+                    'char_end': first_start,
+                    'heading_path': None,
+                    'level': 0
+                })
         
         for i, match in enumerate(matches):
             level = len(match.group(1))  # Number of # symbols
@@ -402,9 +415,10 @@ class HeaderAwareChunker:
             else:
                 end = len(text)
             
-            section_text = text[start:end].strip()
+            # Preserve whitespace to keep char offsets aligned with original text
+            section_text = text[start:end]
             
-            if section_text:
+            if section_text.strip():
                 sections.append({
                     'text': section_text,
                     'char_start': start,
