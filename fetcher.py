@@ -160,7 +160,10 @@ def fetch_url_content(url: str, timeout: int = 10) -> Tuple[Optional[str], Optio
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
         cleaned = "\n".join(lines)
         if cleaned:
-            return title, cleaned, "readability"
+            combined = cleaned
+            if title and title.strip() and title.strip() not in cleaned[: len(title) + 10]:
+                combined = f"{title.strip()}\n\n{cleaned}"
+            return title, combined, "readability"
     except Exception:
         pass
 
@@ -172,4 +175,7 @@ def fetch_url_content(url: str, timeout: int = 10) -> Tuple[Optional[str], Optio
     text = soup.get_text(separator="\n")
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     cleaned = "\n".join(lines)
-    return title, cleaned, "fallback"
+    combined = cleaned
+    if title and title.strip() and title.strip() not in cleaned[: len(title) + 10]:
+        combined = f"{title.strip()}\n\n{cleaned}"
+    return title, combined, "fallback"
