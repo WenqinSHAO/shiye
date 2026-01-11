@@ -40,6 +40,14 @@ uvicorn web:app --reload --port 8000
 
 Visit `http://localhost:8000` in your browser.
 
+### Documentation Map
+
+- **Retrieval pipeline**: [Retrieval.md](Retrieval.md)
+- **Chunking strategies**: [CHUNKING_GUIDE.md](CHUNKING_GUIDE.md)
+- **Debugging retrieval**: [WEB_DEBUG_GUIDE.md](WEB_DEBUG_GUIDE.md) (UI) and [DEBUG_RETRIEVAL_GUIDE.md](DEBUG_RETRIEVAL_GUIDE.md) (pipeline details)
+- **Migration + scripts**: [scripts/README.md](scripts/README.md)
+- **Roadmap / TODO**: [TODO.md](TODO.md)
+
 ### Configuration
 
 Environment variables:
@@ -50,9 +58,22 @@ Environment variables:
 - `SHIYE_EMBED_MODEL` - Embedding model (default: `sentence-transformers/all-MiniLM-L6-v2`)
 - `SHIYE_MODEL_CACHE` - Model cache directory (default: `~/.shiye/models`)
 - `SHIYE_RERANKER` - Reranker to use: `flashrank` (default), `bge`, or `none`
-- `SHIYE_SEARCH_TOP_K` - Number of results to return (default: `20`)
+- `SHIYE_SEARCH_TOP_K` - Number of results to return (default: `5`)
+- `SHIYE_RERANK_TOP_K` - How many candidates to send to the reranker (default: `50`)
+- `SHIYE_RRF_K` - Reciprocal rank fusion constant (default: `60`)
 - `SHIYE_RECENCY_DECAY_DAYS` - Days for recency boost decay (default: `30`)
 - `SHIYE_DEBUG_RETRIEVAL` - Enable debug logging for retrieval pipeline (default: `false`)
+
+### Upgrading from v0.7
+
+1. **Back up data**: `python scripts/backup_restore.py backup`
+2. **Run the migration** (requires embeddings to be available):
+   ```bash
+   python scripts/migrate_v08.py --verbose        # migrate everything
+   python scripts/migrate_v08.py --dry-run -v     # preview only
+   python scripts/migrate_v08.py --doc-type note  # migrate a specific type
+   ```
+   The script re-chunks documents with the v0.8 strategies, sets `chunk_strategy/chunk_version`, writes `heading_path/page_number/parent_doc_seq`, and refreshes FAISS embeddings. See `scripts/README.md` for details.
 
 ## Features
 
@@ -66,16 +87,9 @@ Environment variables:
 - **RSS Feed Aggregation**: Daily summaries from configured feeds
 - **Time-Aware Context**: Automatic timestamp handling and temporal reasoning
 
-### Enhanced Retrieval (v0.7)
+### Enhanced Retrieval & Chunking (v0.8)
 
-Shiye now features a powerful hybrid search system that combines:
-
-1. **Dense Retrieval**: FAISS-based semantic search using sentence embeddings
-2. **Sparse Retrieval**: SQLite FTS5 keyword search with BM25 scoring
-3. **Reciprocal Rank Fusion (RRF)**: Intelligent combination of dense and sparse results
-4. **Cross-Encoder Reranking**: Optional FlashRank reranking for improved top-k accuracy
-5. **Multi-Cue Scoring**: Recency boost, document type preference, exact match detection
-6. **Smart Deduplication**: Keeps only the best chunk per document
+Shiye v0.8 ships hybrid retrieval (dense + sparse + RRF + optional rerank) and token-aware chunking with strategy/version tracking. For the full design notes and configuration details, see [Retrieval.md](Retrieval.md) and [CHUNKING_GUIDE.md](CHUNKING_GUIDE.md).
 
 **Search Filters**:
 - `type:<doc_type>` - Filter by document type (note, web_page, chat, paper, rss_daily_summary)
@@ -192,6 +206,9 @@ Shiye now features a powerful hybrid search system that combines:
 # Install test dependencies
 pip install pytest
 
+# Some fetcher tests require lxml html cleaning support
+pip install lxml_html_clean
+
 # Run all tests
 python -m pytest tests/ -v
 
@@ -231,7 +248,7 @@ shiye/
 
 ## Vision and Roadmap
 
-See [TODO.md](TODO.md) for detailed planning, architectural decisions, and future milestones. Current focus: token-aware chunking and context upgrades for retrieval (also summarized in [Retrieval.md](Retrieval.md)).
+See [TODO.md](TODO.md) for detailed planning, architectural decisions, and future milestones.
 
 ### Long-term Goals
 

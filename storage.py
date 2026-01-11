@@ -31,6 +31,7 @@ import numpy as np
 from config import DATA_DIR, DB_PATH, MODEL_NAME
 from datatypes import Message, Role, ensure_utc
 from chunking import Chunk, HeaderAwareChunker, count_tokens, _get_tokenizer
+from chunking_utils import get_embedding_max_tokens, normalize_chunk_strategy
 from embeddings import EmbeddingProvider
 from vector_store import FaissIndex, faiss
 from retrieval import SearchRequest, Candidate, Reranker, RecencyBooster, TypeBooster, ExactMatchBooster, Deduplicator
@@ -466,29 +467,11 @@ class LocalStore:
 
     def _get_embedding_max_tokens(self) -> Optional[int]:
         """Best-effort detection of the embedder's max token length."""
-        if not self.embedder:
-            return None
-        model = getattr(self.embedder, "model", None)
-        if model is None:
-            return None
-        max_tokens = None
-        try:
-            max_tokens = getattr(model, "max_seq_length", None)
-        except Exception:
-            max_tokens = None
-        if not max_tokens:
-            try:
-                tok = getattr(model, "tokenizer", None)
-                max_tokens = getattr(tok, "model_max_length", None) or getattr(tok, "max_len_single_sentence", None)
-            except Exception:
-                max_tokens = None
-        try:
-            max_tokens = int(max_tokens) if max_tokens else None
-        except Exception:
-            max_tokens = None
-        if max_tokens and 0 < max_tokens < 100000:
-            return max_tokens
-        return None
+        return get_embedding_max_tokens(
+            self.embedder,
+            default=None,
+            use_chunking_tokenizer=False,
+        )
 
     def _split_chunk_for_limit(self, chunk: Chunk, max_tokens: int) -> List[Chunk]:
         """Split a chunk into sub-chunks that respect the embedder's token limit."""
@@ -968,11 +951,6 @@ class LocalStore:
         if max_tokens:
             chunks = self._enforce_chunk_token_limit(chunks, max_tokens)
         
-        # Enforce embedder token limit before embedding
-        max_tokens = self._get_embedding_max_tokens()
-        if max_tokens:
-            chunks = self._enforce_chunk_token_limit(chunks, max_tokens)
-        
         # Embed all chunks
         chunk_texts = [c.text for c in chunks]
         embeddings = self._maybe_embed(chunk_texts)
@@ -980,15 +958,7 @@ class LocalStore:
         now_iso = datetime.now(UTC).isoformat()
         
         # Determine chunk strategy based on chunker type
-        chunk_strategy = type(chunker).__name__.replace('Chunker', '').lower()
-        if 'headeraware' in chunk_strategy:
-            chunk_strategy = 'header-aware'
-        elif 'sentencewindow' in chunk_strategy:
-            chunk_strategy = 'sentence-window'
-        elif 'fixedtoken' in chunk_strategy:
-            chunk_strategy = 'fixed-token'
-        elif 'message' in chunk_strategy:
-            chunk_strategy = 'per-message'
+        chunk_strategy = normalize_chunk_strategy(type(chunker).__name__)
         
         document_meta["chunk_strategy"] = chunk_strategy
         document_meta["chunk_version"] = 1
@@ -1754,7 +1724,7 @@ class LocalStore:
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT c.document_id, d.doc_type
+                SELECT c.id, c.document_id, c.embedding_id, d.doc_type
                 FROM chunks c
                 JOIN documents d ON c.document_id = d.id
                 WHERE c.id = ? AND c.deleted = 0
@@ -1767,12 +1737,18 @@ class LocalStore:
             doc_id = row["document_id"]
             doc_type = (row["doc_type"] or "").lower()
 
+            # Collect embedding IDs to remove from FAISS
+            embedding_ids_to_remove = []
+
             # For non-chat docs, remove all chunks belonging to the document
             if doc_type != "chat":
-                cur.execute("SELECT id FROM chunks WHERE document_id = ? AND deleted = 0", (doc_id,))
-                doc_chunk_ids = [r["id"] for r in cur.fetchall()]
-                if not doc_chunk_ids:
+                cur.execute("SELECT id, embedding_id FROM chunks WHERE document_id = ? AND deleted = 0", (doc_id,))
+                doc_chunks = cur.fetchall()
+                if not doc_chunks:
                     return False
+                doc_chunk_ids = [r["id"] for r in doc_chunks]
+                embedding_ids_to_remove = [r["embedding_id"] for r in doc_chunks if r["embedding_id"] is not None]
+                
                 cur.execute("UPDATE chunks SET deleted = 1 WHERE document_id = ?", (doc_id,))
                 # Mark document as deleted for bookkeeping (keeps row for audit)
                 cur.execute("UPDATE documents SET status = 'deleted' WHERE id = ?", (doc_id,))
@@ -1780,17 +1756,26 @@ class LocalStore:
             else:
                 # Chat messages: only delete the specific chunk
                 cur.execute("UPDATE chunks SET deleted = 1 WHERE id = ?", (chunk_id,))
-                if cur.rowcount == 0:
-                    return False
                 removed_ids = [chunk_id]
-
-        if removed_ids and self._faiss_index:
+                if row["embedding_id"] is not None:
+                    embedding_ids_to_remove = [row["embedding_id"]]
+        
+        # Remove embeddings from FAISS index after DB transaction
+        if self._faiss_index and embedding_ids_to_remove:
             try:
-                selector = faiss.IDSelectorBatch(np.array(removed_ids, dtype="int64"))
-                self._faiss_index.index.remove_ids(selector)
-            except Exception:
-                pass  # ignore FAISS removal errors
-        return bool(removed_ids)
+                ids_array = np.array(embedding_ids_to_remove, dtype='int64')
+                self._faiss_index.index.remove_ids(ids_array)
+                self._faiss_index.persist()
+                if len(removed_ids) > 0:
+                    # Update index metadata timestamp
+                    now_iso = datetime.now(UTC).isoformat()
+                    with self._connect() as conn:
+                        cur = conn.cursor()
+                        self._write_index_meta(cur, now_iso)
+            except Exception as e:
+                print(f"[warn] Failed to remove {len(embedding_ids_to_remove)} embeddings from FAISS: {e}")
+        
+        return True
 
     def get_rss_item_hashes(self) -> set:
         """Get all processed RSS item hashes."""
@@ -1897,7 +1882,43 @@ class LocalStore:
             chunk_rows = cur.fetchall()
 
         tags = json.loads(doc_row["tags"]) if doc_row["tags"] else {}
+        doc_type = doc_row["doc_type"] if "doc_type" in doc_row.keys() else None
         raw_content = doc_row["raw_content"] if "raw_content" in doc_row.keys() else None
+
+        # Reconstruct chat content from stored JSON for consistent rendering/offets
+        chat_ranges: list[tuple[int, int]] = []
+        if doc_type == "chat" and raw_content:
+            try:
+                data = json.loads(raw_content)
+                # Stored as a list of messages (common for multi-turn/chat migrations)
+                if isinstance(data, list):
+                    parts: list[str] = []
+                    cursor = 0
+                    for item in data:
+                        text = ""
+                        if isinstance(item, dict):
+                            text = item.get("content") or ""
+                        else:
+                            text = str(item)
+                        parts.append(text)
+                        start = cursor
+                        end = start + len(text)
+                        chat_ranges.append((start, end))
+                        cursor = end + 1  # message chunker used +1 offset between messages
+                    raw_content = "\n".join(parts)
+                # Stored as a single message dict (default per-message ingestion)
+                elif isinstance(data, dict):
+                    text = data.get("content") or ""
+                    chat_ranges = [(0, len(text))]
+                    raw_content = text
+                else:
+                    # Unknown shape; fallback to chunk text path
+                    chat_ranges = []
+                    raw_content = None
+            except Exception:
+                chat_ranges = []
+                raw_content = None
+
         content = raw_content if raw_content is not None else ""
 
         derived_ranges: list[tuple[int, int]] = []
@@ -1926,6 +1947,9 @@ class LocalStore:
             else:
                 start = row["char_start"] if "char_start" in row.keys() else None
                 end = row["char_end"] if "char_end" in row.keys() else None
+                # If we reconstructed chat content from JSON, prefer its computed ranges
+                if chat_ranges and idx < len(chat_ranges):
+                    start, end = chat_ranges[idx]
                 if start is None or end is None or end < start:
                     if text:
                         found = content.find(text, search_cursor)

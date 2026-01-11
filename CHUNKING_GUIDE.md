@@ -2,6 +2,11 @@
 
 This document describes the token-aware chunking strategies implemented in Shiye v0.8 for improved retrieval quality and context preservation.
 
+**Related docs**
+- Retrieval overview: [Retrieval.md](Retrieval.md)
+- Migration usage: [scripts/README.md](scripts/README.md)
+- Debugging retrieval: [DEBUG_RETRIEVAL_GUIDE.md](DEBUG_RETRIEVAL_GUIDE.md) and [WEB_DEBUG_GUIDE.md](WEB_DEBUG_GUIDE.md)
+
 ## Overview
 
 Chunking is the process of splitting documents into smaller, semantically meaningful pieces that:
@@ -20,6 +25,7 @@ Notes use `HeaderAwareChunker` which:
 - Preserves heading hierarchy (e.g., "Introduction > Background > Related Work")
 - Respects token limits (300 tokens max per chunk)
 - Splits long sections further if needed
+- Keeps pre-heading preambles and preserves whitespace so `char_start/char_end` align to the original text
 
 **Configuration**:
 ```python
@@ -163,34 +169,15 @@ Benefits:
 
 ## Migration for Existing Data
 
-Existing chunks (pre-v0.8) will:
-- Continue to work with the new system
-- Have default values for new fields (heading_path=None, etc.)
-- Can be re-chunked selectively by document type
-
-To re-chunk existing notes:
-```python
-# TODO: Background rechunking job implementation
-# Will allow selective re-processing of documents with new chunking strategies
-```
-
-## Configuration Options
-
-Chunking behavior can be customized via environment variables:
+Existing chunks (pre-v0.8) keep working, but you can re-chunk/re-embed them with the migration script:
 
 ```bash
-# Enable/disable chunking for new documents
-SHIYE_USE_CHUNKING=true
-
-# Chunk size for fixed-token chunker
-SHIYE_CHUNK_SIZE=256
-
-# Overlap tokens for fixed-token chunker
-SHIYE_CHUNK_OVERLAP=20
-
-# Neighbor expansion range for context assembly
-SHIYE_NEIGHBOR_RANGE=1
+python scripts/migrate_v08.py --dry-run -v     # preview
+python scripts/migrate_v08.py --verbose        # migrate everything
+python scripts/migrate_v08.py --doc-type note  # migrate a single type
 ```
+
+The migration normalizes `chunk_strategy/chunk_version`, fills `heading_path/page_number/parent_doc_seq`, and refreshes FAISS embeddings. It requires the embedding model to be available; run `scripts/backup_restore.py` first. For full options and output examples, see [scripts/README.md](scripts/README.md).
 
 ## Performance Considerations
 

@@ -7,6 +7,7 @@ from workspace import MemoryWorkspace
 from datatypes import Message, Role
 from datetime import datetime, UTC
 from retrieval import SearchRequest, ContextPacker
+from context_assembly import expand_chunks_with_neighbors
 
 
 class MockEmbedder:
@@ -184,3 +185,66 @@ def test_empty_search_fallback():
         assert context_bundle['total_items'] == 0
         assert context_bundle['estimated_tokens'] == 0
         assert context_bundle['context_items'] == []
+
+
+def test_expand_chunks_with_neighbors_respects_max_expansion_chars():
+    """Test that neighbor expansion respects max expansion size across both sides."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = LocalStore(embedder=MockEmbedder(), db_path=Path(tmp) / "test.db")
+
+        doc_id = store._insert_document({
+            "doc_type": "note",
+            "title": "Neighbor document",
+            "raw_content": "neighbor test",
+        })
+
+        chunk_texts = ["A" * 8, "B" * 8, "C" * 10, "D" * 8, "E" * 8]
+        chunk_ids = []
+        now = datetime.now(UTC).isoformat()
+        char_start = 0
+        with store._connect() as conn:
+            cur = conn.cursor()
+            for seq, text in enumerate(chunk_texts):
+                char_end = char_start + len(text)
+                cur.execute(
+                    """
+                    INSERT INTO chunks (document_id, seq, text, role, token_count, embedding_id,
+                                       created_at, event_at, tags, focus_hint, char_start, char_end,
+                                       embedding_model, heading_path, page_number, parent_doc_seq)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        doc_id,
+                        seq,
+                        text,
+                        Role.SYSTEM.value,
+                        None,
+                        None,
+                        now,
+                        now,
+                        None,
+                        None,
+                        char_start,
+                        char_end,
+                        None,
+                        None,
+                        None,
+                        seq,
+                    ),
+                )
+                chunk_ids.append(cur.lastrowid)
+                char_start = char_end + 1
+
+        max_expansion_chars = 40
+        expanded = expand_chunks_with_neighbors(
+            store,
+            [chunk_ids[2]],
+            neighbor_range=2,
+            max_expansion_chars=max_expansion_chars,
+        )
+
+        assert len(expanded) == 1
+        expanded_chunk = expanded[0]
+        assert len(expanded_chunk.expanded_text) <= max_expansion_chars
+        assert expanded_chunk.neighbor_seq_before == [0, 1]
+        assert expanded_chunk.neighbor_seq_after == [3]

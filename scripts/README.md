@@ -2,6 +2,10 @@
 
 Utilities to operate on Shiye data without digging into other docs.
 
+**Related docs**
+- Quick start and migration overview: [README.md](../README.md)
+- Chunking and metadata details: [CHUNKING_GUIDE.md](../CHUNKING_GUIDE.md)
+
 ## backup_restore.py
 
 Back up and restore the primary storage files (`shiye.db`, `shiye.faiss`).
@@ -36,12 +40,12 @@ Migration script for v0.7 to v0.8 chunking enhancements. This script re-chunks e
 ### Key Fixes
 
 1. **FAISS Update**: Corrected from `add(embeddings, ids)` to `add(ids, embeddings)` (note: `add()` automatically persists to disk)
-2. **FAISS Cleanup**: Old chunk embeddings are removed from FAISS index before adding new ones, preventing stale vectors from appearing in search results
+2. **FAISS Cleanup**: Old chunk embeddings are removed **after** new vectors are written successfully; FAISS failures leave old chunks active and roll back the document strategy/version.
 3. **Chat Chunking**: Fixed from passing string `chunker.chunk(content)` to list `chunker.chunk(messages)` for MessageChunker
 4. **Strategy Names**: Changed from raw class names like `HeaderAwareChunker` to normalized names like `header-aware`
-5. **Embedding IDs**: Now properly sets `embedding_id` column and writes index metadata after migration
-6. **Role Preservation**: Chat message roles (user/assistant/system) are preserved during migration instead of being overwritten with SYSTEM
-7. **Timestamp Preservation**: Original `created_at` and `event_at` timestamps are preserved, maintaining recency scoring and history integrity
+5. **Embedding IDs**: Sets `embedding_id` to the new chunk IDs and writes vector index metadata when FAISS is available; migration aborts if embeddings cannot be generated.
+6. **Role/Timestamp Preservation**: Chat message roles and timestamps are preserved when present; missing values fall back to document timestamps.
+7. **Token Limits**: Enforces the embedder's max token length before embedding so oversized chunks are split safely.
 
 ### Usage
 
@@ -82,12 +86,13 @@ The script will:
 2. Re-chunk using the appropriate v0.8 chunker for the document type
 3. Soft-delete old chunks (set `deleted = 1`)
 4. Insert new chunks with proper metadata
-5. Generate and store embeddings in FAISS index (if embedder available)
+5. Generate embeddings (required) and store them in FAISS when the index is available
 6. Set `chunk_strategy` and `chunk_version = 1` on the document
 
 ### Safety
 
 - Old chunks are soft-deleted (not removed) so you can rollback if needed
+- Requires the embedding model to be available; run `scripts/backup_restore.py backup` before migrating
 - Supports dry-run mode to preview changes
 - Per-document error handling - failures don't stop the entire migration
 - Detailed statistics and error reporting

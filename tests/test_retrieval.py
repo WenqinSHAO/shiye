@@ -274,3 +274,23 @@ def test_full_search_pipeline(temp_store):
     # Top result should be relevant
     assert any('kubernetes' in c.text_preview.lower() or 'container' in c.text_preview.lower() 
                for c in results[:3] if c.text_preview)
+
+
+def test_workspace_search_matches_store_hits(temp_store):
+    """Ensure workspace search returns the same hits as store search after batching."""
+    from workspace import MemoryWorkspace
+
+    messages = [
+        Message(content="Kubernetes orchestration and container management", role=Role.USER),
+        Message(content="Docker containerization best practices", role=Role.USER),
+        Message(content="Python machine learning frameworks", role=Role.USER),
+    ]
+
+    temp_store.add_messages(messages, document_meta={'doc_type': 'note', 'title': 'Tech Notes'})
+
+    request = SearchRequest(query="kubernetes container", top_k=5)
+    candidates = temp_store.search(request)
+    workspace = MemoryWorkspace(store=temp_store)
+    hits = workspace.search(request)
+
+    assert [c.chunk_id for c in candidates] == [h.chunk_id for h in hits]

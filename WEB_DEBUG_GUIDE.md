@@ -4,6 +4,10 @@
 
 The debug mode in the web UI provides a visual, interactive way to understand how the enhanced retrieval pipeline works.
 
+**Related docs**
+- Pipeline details and score definitions: [DEBUG_RETRIEVAL_GUIDE.md](DEBUG_RETRIEVAL_GUIDE.md)
+- Retrieval overview: [Retrieval.md](Retrieval.md)
+
 ### Enabling Debug Mode
 
 1. **Enable the debug toggle** in the web UI header (checkbox labeled "Debug")
@@ -20,6 +24,7 @@ or with filters:
 ```
 
 The debug panel will automatically appear below your search results when debug mode is enabled.
+See `DEBUG_RETRIEVAL_GUIDE.md` for the full pipeline breakdown and score component reference.
 
 ## What You'll See
 
