@@ -648,6 +648,20 @@ class LocalStore:
         """Hydrate a Message preferring raw_content when available."""
         metadata = json.loads(row["tags"]) if row["tags"] else {}
         metadata["chunk_id"] = row["id"]
+        # Enrich with document/strategy metadata when present
+        doc_id = row["doc_id"] if "doc_id" in row.keys() else row["document_id"] if "document_id" in row.keys() else None
+        if doc_id is not None:
+            metadata["doc_id"] = doc_id
+        if "doc_type" in row.keys():
+            metadata["doc_type"] = row["doc_type"]
+        if "doc_chunk_strategy" in row.keys():
+            metadata["chunk_strategy"] = row["doc_chunk_strategy"]
+        if "doc_chunk_version" in row.keys():
+            metadata["chunk_version"] = row["doc_chunk_version"]
+        if "doc_chunk_count" in row.keys() and row["doc_chunk_count"] is not None:
+            metadata["chunk_count"] = row["doc_chunk_count"]
+        if "seq" in row.keys():
+            metadata.setdefault("chunk_seq", row["seq"])
         
         content = row["text"]
         role = row["role"]
@@ -665,7 +679,15 @@ class LocalStore:
             if doc_raw and doc_type == "chat":
                 try:
                     data = json.loads(doc_raw)
-                    if isinstance(data, list) and row["seq"] is not None and 0 <= row["seq"] < len(data):
+                    if isinstance(data, dict):
+                        content = data.get("content", content)
+                        role = data.get("role") or role
+                        created_at = data.get("created_at") or created_at
+                        reference_time = data.get("event_at") or data.get("reference_time") or reference_time
+                        msg_tags = data.get("tags") or data.get("metadata")
+                        if isinstance(msg_tags, dict):
+                            metadata.update(msg_tags)
+                    elif isinstance(data, list) and row["seq"] is not None and 0 <= row["seq"] < len(data):
                         item = data[row["seq"]]
                         if isinstance(item, dict):
                             content = item.get("content", content)
@@ -725,6 +747,7 @@ class LocalStore:
         ids: List[int] = []
         if not messages:
             return ids
+
         # If this looks like a non-chat document without a chunking strategy, route through chunked ingestion
         if document_meta and document_meta.get("doc_type") != "chat" and not document_meta.get("chunk_strategy"):
             if len(messages) == 1:
@@ -735,84 +758,54 @@ class LocalStore:
                     print(f"[warn] chunked ingestion fallback failed, continuing with add_messages: {e}")
             else:
                 print("[warn] chunked ingestion skipped: multiple messages provided without chunk_strategy")
-        
+
         embeddings = self._maybe_embed([m.content for m in messages])
-        raw_messages = [m.to_dict() for m in messages]
-        joined_text = "\n\n".join(m.content for m in messages)
-        
-        # Determine if we're creating a new document or using default chat
-        doc_id = self.default_doc_id
-        is_new_document = document_meta is not None
-        
-        if document_meta:
-            try:
-                # Add chunking strategy for chat documents
-                if document_meta.get("doc_type") == "chat":
-                    document_meta.setdefault("chunk_strategy", "per-message")
-                    document_meta["chunk_version"] = document_meta.get("chunk_version", 1)
-                    document_meta.setdefault("raw_content", json.dumps(raw_messages))
+
+        for idx, msg in enumerate(messages):
+            base_meta = document_meta.copy() if document_meta else {}
+            doc_type = base_meta.get("doc_type") or "chat"
+            chunk_strategy = base_meta.get("chunk_strategy")
+            if not chunk_strategy and doc_type == "chat":
+                chunk_strategy = "per-message"
+            chunk_version = base_meta.get("chunk_version", 1)
+
+            # Raw content: persist the single message for fidelity
+            raw_content = base_meta.get("raw_content")
+            if raw_content is None:
+                if doc_type == "chat":
+                    try:
+                        raw_content = json.dumps(msg.to_dict())
+                    except Exception:
+                        raw_content = msg.content
                 else:
-                    document_meta.setdefault("chunk_version", 1)
-                    document_meta.setdefault("raw_content", joined_text)
-                doc_id = self._insert_document(document_meta)
-            except Exception as e:
-                print(f"[warn] failed to insert document, falling back to default: {e}")
-                is_new_document = False
-        
-        # For default/legacy documents, ensure metadata and raw_content are present
-        if not is_new_document:
+                    raw_content = msg.content
+
+            doc_meta = {
+                "doc_type": doc_type,
+                "source": base_meta.get("source"),
+                "uri": base_meta.get("uri"),
+                "title": base_meta.get("title"),
+                "tags": base_meta.get("tags"),
+                "sensitivity": base_meta.get("sensitivity"),
+                "hash": base_meta.get("hash"),
+                "status": base_meta.get("status"),
+                "raw_content": raw_content,
+                "chunk_strategy": chunk_strategy,
+                "chunk_version": chunk_version,
+                "created_at": base_meta.get("created_at") or ensure_utc(msg.created_at),
+                "event_at": base_meta.get("event_at") or ensure_utc(msg.reference_time),
+                "ingested_at": base_meta.get("ingested_at") or datetime.now(UTC),
+            }
+
+            doc_id = self._insert_document(doc_meta)
+
             with self._connect() as conn:
                 cur = conn.cursor()
-                cur.execute("SELECT doc_type, raw_content, chunk_strategy, chunk_version FROM documents WHERE id = ?", (doc_id,))
-                row = cur.fetchone()
-                if row:
-                    doc_type = row["doc_type"] or "chat"
-                    # Always ensure chunk_strategy for default chat doc
-                    if row["chunk_strategy"] is None:
-                        cur.execute(
-                            "UPDATE documents SET chunk_strategy = ?, chunk_version = COALESCE(chunk_version, ?) WHERE id = ?",
-                            ("per-message", 1, doc_id)
-                        )
-                    if doc_type == "chat":
-                        # Merge new messages into raw_content list for UI/history fidelity
-                        existing_raw = []
-                        if row["raw_content"]:
-                            try:
-                                parsed = json.loads(row["raw_content"])
-                                if isinstance(parsed, list):
-                                    existing_raw = parsed
-                            except Exception:
-                                existing_raw = []
-                        merged_raw = existing_raw + raw_messages
-                        cur.execute(
-                            "UPDATE documents SET raw_content = ?, chunk_version = COALESCE(chunk_version, ?) WHERE id = ?",
-                            (json.dumps(merged_raw), 1, doc_id)
-                        )
-                    elif row["raw_content"] is None:
-                        # Non-chat doc without raw_content: persist full text for UI display
-                        cur.execute(
-                            "UPDATE documents SET raw_content = ? WHERE id = ?",
-                            (joined_text, doc_id)
-                        )
-        
-        with self._connect() as conn:
-            cur = conn.cursor()
-            now_iso = datetime.now(UTC).isoformat()
-            
-            # Calculate cumulative char offsets for proper provenance
-            cumulative_offset = 0
-            for idx, msg in enumerate(messages):
-                embedding_id = None
-                if embeddings is not None:
-                    embedding_id = None  # filled after chunk id known
                 created_at = ensure_utc(msg.created_at) or datetime.now(UTC)
-                
-                # Calculate cumulative char positions
-                # Each message starts where the previous one ended (plus a newline separator)
-                char_start = cumulative_offset
-                char_end = char_start + len(msg.content)
-                cumulative_offset = char_end + 1  # +1 for newline separator between messages
-                
+                reference_time = ensure_utc(msg.reference_time) if msg.reference_time else None
+                char_start = 0
+                char_end = len(msg.content)
+
                 cur.execute(
                     """
                     INSERT INTO chunks (document_id, seq, text, role, token_count, embedding_id, created_at, event_at, tags, focus_hint, char_start, char_end, embedding_model, parent_doc_seq)
@@ -820,19 +813,19 @@ class LocalStore:
                     """,
                     (
                         doc_id,
-                        idx,
+                        0,
                         msg.content,
                         msg.role.value,
                         None,
                         None,
                         created_at.isoformat(),
-                        ensure_utc(msg.reference_time).isoformat() if msg.reference_time else None,
+                        reference_time.isoformat() if reference_time else None,
                         json.dumps(msg.metadata) if msg.metadata else None,
                         msg.metadata.get("focus_hint") if msg.metadata else None,
                         char_start,
                         char_end,
                         MODEL_NAME,
-                        idx,  # parent_doc_seq tracks message sequence
+                        0,  # parent_doc_seq tracks message sequence within a single-message doc
                     ),
                 )
                 chunk_id = cur.lastrowid
@@ -846,8 +839,9 @@ class LocalStore:
                     )
                     if self._faiss_index:
                         self._faiss_index.add([embedding_id], emb_vec)
-            if self._faiss_index:
-                self._write_index_meta(cur, now_iso)
+                if self._faiss_index:
+                    self._write_index_meta(cur, datetime.now(UTC).isoformat())
+
         return ids
 
     def add_document_chunked(
@@ -981,7 +975,13 @@ class LocalStore:
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT c.*, d.doc_type, d.raw_content AS doc_raw_content
+                SELECT c.*,
+                       d.doc_type,
+                       d.raw_content AS doc_raw_content,
+                       d.chunk_strategy AS doc_chunk_strategy,
+                       d.chunk_version AS doc_chunk_version,
+                       d.id AS doc_id,
+                       (SELECT COUNT(*) FROM chunks c2 WHERE c2.document_id = c.document_id AND c2.deleted = 0) AS doc_chunk_count
                 FROM chunks c
                 JOIN documents d ON c.document_id = d.id
                 WHERE c.deleted = 0 AND c.created_at IS NOT NULL AND date(c.created_at) = ?
@@ -992,7 +992,6 @@ class LocalStore:
             rows = cur.fetchall()
 
         messages: List[Message] = []
-        raw_cache: dict[int, list] = {}
         seen_raw_docs: set[int] = set()
 
         for row in rows:
@@ -1003,22 +1002,27 @@ class LocalStore:
 
             # For chat docs with stored raw_content, skip any derived chunks
             if doc_type == "chat" and raw:
-                raw_list = raw_cache.get(doc_id)
-                if raw_list is None:
-                    try:
-                        parsed = json.loads(raw)
-                        raw_list = parsed if isinstance(parsed, list) else []
-                    except Exception:
-                        raw_list = []
-                    raw_cache[doc_id] = raw_list
-                # Use chunk data directly to preserve correct timestamps/ordering when raw seq is unreliable
-                msg = self._row_to_message(row, use_raw=False)
+                msg = self._row_to_message(row)
 
             # For non-chat docs with raw_content, only emit one entry per document (first seen)
             elif raw:
                 if doc_id in seen_raw_docs:
                     continue
                 seen_raw_docs.add(doc_id)
+                metadata = json.loads(row["tags"]) if row["tags"] else {}
+                metadata["chunk_id"] = row["id"]
+                if doc_id is not None:
+                    metadata["doc_id"] = doc_id
+                if doc_type:
+                    metadata["doc_type"] = doc_type
+                if "doc_chunk_strategy" in row.keys() and row["doc_chunk_strategy"]:
+                    metadata["chunk_strategy"] = row["doc_chunk_strategy"]
+                if "doc_chunk_version" in row.keys() and row["doc_chunk_version"] is not None:
+                    metadata["chunk_version"] = row["doc_chunk_version"]
+                if "doc_chunk_count" in row.keys() and row["doc_chunk_count"] is not None:
+                    metadata["chunk_count"] = row["doc_chunk_count"]
+                if "seq" in row.keys() and row["seq"] is not None:
+                    metadata["chunk_seq"] = row["seq"]
                 try:
                     created_at = ensure_utc(datetime.fromisoformat(row["created_at"])) if row["created_at"] else datetime.now(UTC)
                 except Exception:
@@ -1027,8 +1031,6 @@ class LocalStore:
                     reference_time = ensure_utc(datetime.fromisoformat(row["event_at"])) if row["event_at"] else None
                 except Exception:
                     reference_time = None
-                metadata = json.loads(row["tags"]) if row["tags"] else {}
-                metadata["chunk_id"] = row["id"]
                 role_val = row["role"] or Role.SYSTEM.value
                 msg = Message(
                     content=str(raw),
@@ -1046,6 +1048,12 @@ class LocalStore:
             msg_day = ensure_utc(msg.created_at).date().isoformat()
             if msg_day != day:
                 continue
+            meta = msg.metadata or {}
+            if "seq" in row.keys() and row["seq"] is not None:
+                meta["chunk_seq"] = row["seq"]
+            if "doc_chunk_count" in row.keys() and row["doc_chunk_count"] is not None:
+                meta["chunk_count"] = row["doc_chunk_count"]
+            msg.metadata = meta
             messages.append(msg)
 
         messages.sort(key=lambda m: ensure_utc(m.created_at))
@@ -1067,7 +1075,6 @@ class LocalStore:
             rows = cur.fetchall()
 
         day_counts: dict[str, int] = {}
-        raw_cache: dict[int, list] = {}
         processed_raw_docs: set[int] = set()
 
         for row in rows:

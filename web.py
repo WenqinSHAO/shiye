@@ -359,6 +359,28 @@ def index() -> HTMLResponse:
                 historyWrapper.style.width = `${clamped}px`;
             };
             applySavedHistoryWidth();
+
+            function formatDocType(meta) {
+                const t = (meta && meta.doc_type) ? String(meta.doc_type).toLowerCase() : "";
+                switch (t) {
+                    case "web_page": return "url";
+                    case "rss_daily_summary": return "rss_summary";
+                    case "chat": return "chat";
+                    case "note": return "note";
+                    case "paper": return "paper";
+                    default: return t || "document";
+                }
+            }
+
+            function formatChunkStrategy(meta) {
+                const s = meta && meta.chunk_strategy ? String(meta.chunk_strategy).toLowerCase() : "";
+                if (!s) return "";
+                if (s.includes("message")) return "per-message";
+                if (s.includes("sentence")) return "sentence";
+                if (s.includes("header") || s.includes("structure")) return "structure-aware";
+                if (s.includes("fixed")) return "fixed";
+                return s;
+            }
             function normalizeLinkValue(val) {
                 if (typeof val === "string") return val;
                 if (!val) return "";
@@ -1276,7 +1298,20 @@ def index() -> HTMLResponse:
                 const ts = m.created_at ? new Date(m.created_at).toLocaleString() : '';
                 const roleEl = document.createElement('div');
                 roleEl.className = 'role';
-                roleEl.textContent = `${m.role} • ${ts}`;
+                const chips = [];
+                const meta = m.metadata || {};
+                const docTypeLabel = formatDocType(meta);
+                if (docTypeLabel) {
+                    chips.push(meta.doc_id ? `${docTypeLabel} #${meta.doc_id}` : docTypeLabel);
+                } else if (meta.doc_id) {
+                    chips.push(`doc #${meta.doc_id}`);
+                }
+                if (meta.source) chips.push(meta.source);
+                if (meta.chunk_count !== undefined) chips.push(`chunks ${meta.chunk_count}`);
+                const strat = formatChunkStrategy(meta);
+                if (strat) chips.push(strat);
+                const chipsText = chips.length ? ` • ${chips.join(' • ')}` : '';
+                roleEl.textContent = `${m.role} • ${ts}${chipsText}`;
                 const body = document.createElement('div');
                 body.className = 'history-body';
                 // Set context for image URL resolution

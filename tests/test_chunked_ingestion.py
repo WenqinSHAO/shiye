@@ -127,22 +127,27 @@ def test_add_messages_populates_chunk_strategy(temp_store):
     
     assert len(chunk_ids) == 3
     
-    # Get document ID from first chunk
+    # Each chunk should belong to its own chat document with per-message strategy
     with temp_store._connect() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT document_id FROM chunks WHERE id = ?", (chunk_ids[0],))
-        doc_id = cur.fetchone()['document_id']
-        
-        # Verify chunk_strategy was set
-        cur.execute("SELECT chunk_strategy, chunk_version FROM documents WHERE id = ?", (doc_id,))
-        doc_row = cur.fetchone()
-        assert doc_row['chunk_strategy'] == 'per-message'
-        assert doc_row['chunk_version'] == 1
-        
-        # Verify chunks have parent_doc_seq set
-        cur.execute("SELECT parent_doc_seq FROM chunks WHERE document_id = ? ORDER BY seq", (doc_id,))
-        seqs = [row['parent_doc_seq'] for row in cur.fetchall()]
-        assert seqs == [0, 1, 2]
+        cur.execute(
+            "SELECT document_id, parent_doc_seq FROM chunks WHERE id IN (?, ?, ?) ORDER BY document_id",
+            chunk_ids,
+        )
+        rows = cur.fetchall()
+        doc_ids = [r["document_id"] for r in rows]
+        assert len(set(doc_ids)) == 3
+        assert all(r["parent_doc_seq"] == 0 for r in rows)
+
+        cur.execute(
+            f"SELECT id, chunk_strategy, chunk_version FROM documents WHERE id IN ({','.join('?' for _ in doc_ids)})",
+            doc_ids,
+        )
+        docs = cur.fetchall()
+        assert len(docs) == 3
+        for doc in docs:
+            assert doc["chunk_strategy"] == "per-message"
+            assert doc["chunk_version"] == 1
 
 
 def test_save_note_regular_populates_chunk_strategy(temp_store):
@@ -220,34 +225,28 @@ def test_chat_messages_have_cumulative_offsets(temp_store):
     
     assert len(chunk_ids) == 3
     
-    # Verify cumulative offsets
+    # Verify offsets are per-message documents (each chunk starts at 0)
     with temp_store._connect() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT char_start, char_end, text FROM chunks WHERE id IN (?, ?, ?) ORDER BY seq", chunk_ids)
+        cur.execute(
+            "SELECT char_start, char_end, text, document_id FROM chunks WHERE id IN (?, ?, ?) ORDER BY document_id",
+            chunk_ids,
+        )
         chunks = cur.fetchall()
         
-        # First message: starts at 0
-        assert chunks[0]['char_start'] == 0
-        assert chunks[0]['char_end'] == len(messages[0].content)
-        
-        # Second message: starts where first ended + 1 (separator)
-        expected_start = chunks[0]['char_end'] + 1
-        assert chunks[1]['char_start'] == expected_start
-        assert chunks[1]['char_end'] == expected_start + len(messages[1].content)
-        
-        # Third message: starts where second ended + 1
-        expected_start = chunks[1]['char_end'] + 1
-        assert chunks[2]['char_start'] == expected_start
-        assert chunks[2]['char_end'] == expected_start + len(messages[2].content)
+        assert len({c["document_id"] for c in chunks}) == 3
+        for msg, chunk in zip(messages, chunks):
+            assert chunk["char_start"] == 0
+            assert chunk["char_end"] == len(msg.content)
 
 
 def test_default_chat_gets_chunk_strategy(temp_store):
-    """Test that messages added to default chat document get chunk_strategy set."""
+    """Test that messages without document_meta still get per-message chunk_strategy."""
     messages = [
         Message(content="Test message", role=Role.USER),
     ]
     
-    # Add without document_meta (uses default chat document)
+    # Add without document_meta (uses one document per message)
     chunk_ids = temp_store.add_messages(messages)
     
     # Get document ID
