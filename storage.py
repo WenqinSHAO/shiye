@@ -644,7 +644,7 @@ class LocalStore:
             )
             return cur.lastrowid
 
-    def _row_to_message(self, row: sqlite3.Row) -> Message:
+    def _row_to_message(self, row: sqlite3.Row, use_raw: bool = True) -> Message:
         """Hydrate a Message preferring raw_content when available."""
         metadata = json.loads(row["tags"]) if row["tags"] else {}
         metadata["chunk_id"] = row["id"]
@@ -654,28 +654,29 @@ class LocalStore:
         created_at = row["created_at"]
         reference_time = row["event_at"]
         
-        doc_raw = None
-        if "doc_raw_content" in row.keys():
-            doc_raw = row["doc_raw_content"]
-        elif "raw_content" in row.keys():
-            doc_raw = row["raw_content"]
-        doc_type = row["doc_type"] if "doc_type" in row.keys() else None
-        
-        if doc_raw and doc_type == "chat":
-            try:
-                data = json.loads(doc_raw)
-                if isinstance(data, list) and row["seq"] < len(data):
-                    item = data[row["seq"]]
-                    if isinstance(item, dict):
-                        content = item.get("content", content)
-                        role = item.get("role") or role
-                        created_at = item.get("created_at") or created_at
-                        reference_time = item.get("event_at") or item.get("reference_time") or reference_time
-                        msg_tags = item.get("tags") or item.get("metadata")
-                        if isinstance(msg_tags, dict):
-                            metadata.update(msg_tags)
-            except Exception:
-                pass
+        if use_raw:
+            doc_raw = None
+            if "doc_raw_content" in row.keys():
+                doc_raw = row["doc_raw_content"]
+            elif "raw_content" in row.keys():
+                doc_raw = row["raw_content"]
+            doc_type = row["doc_type"] if "doc_type" in row.keys() else None
+            
+            if doc_raw and doc_type == "chat":
+                try:
+                    data = json.loads(doc_raw)
+                    if isinstance(data, list) and row["seq"] is not None and 0 <= row["seq"] < len(data):
+                        item = data[row["seq"]]
+                        if isinstance(item, dict):
+                            content = item.get("content", content)
+                            role = item.get("role") or role
+                            created_at = item.get("created_at") or created_at
+                            reference_time = item.get("event_at") or item.get("reference_time") or reference_time
+                            msg_tags = item.get("tags") or item.get("metadata")
+                            if isinstance(msg_tags, dict):
+                                metadata.update(msg_tags)
+                except Exception:
+                    pass
         
         return Message(
             content=content,
@@ -1010,9 +1011,8 @@ class LocalStore:
                     except Exception:
                         raw_list = []
                     raw_cache[doc_id] = raw_list
-                if raw_list and row["seq"] is not None and row["seq"] >= len(raw_list):
-                    continue
-                msg = self._row_to_message(row)
+                # Use chunk data directly to preserve correct timestamps/ordering when raw seq is unreliable
+                msg = self._row_to_message(row, use_raw=False)
 
             # For non-chat docs with raw_content, only emit one entry per document (first seen)
             elif raw:
@@ -1069,7 +1069,6 @@ class LocalStore:
         day_counts: dict[str, int] = {}
         raw_cache: dict[int, list] = {}
         processed_raw_docs: set[int] = set()
-        processed_chat_docs: set[int] = set()
 
         for row in rows:
             doc_id = row["document_id"]
@@ -1077,30 +1076,15 @@ class LocalStore:
             raw = row["doc_raw_content"]
 
             # Count chat messages from raw_content only once per document
-            if doc_type == "chat" and raw:
-                if doc_id in processed_chat_docs:
-                    continue
-                processed_chat_docs.add(doc_id)
-                raw_list = raw_cache.get(doc_id)
-                if raw_list is None:
-                    try:
-                        parsed = json.loads(raw)
-                        raw_list = parsed if isinstance(parsed, list) else []
-                    except Exception:
-                        raw_list = []
-                    raw_cache[doc_id] = raw_list
-                if raw_list:
-                    for item in raw_list:
-                        ts_val = item.get("created_at") if isinstance(item, dict) else None
-                        try:
-                            day = ensure_utc(datetime.fromisoformat(ts_val)).date().isoformat() if ts_val else None
-                        except Exception:
-                            day = None
-                        if not day:
-                            continue
-                        day_counts[day] = day_counts.get(day, 0) + 1
-                    continue
-                # fall back to chunk timestamps if raw_list empty
+            if doc_type == "chat":
+                ts_val = row["created_at"]
+                try:
+                    day = ensure_utc(datetime.fromisoformat(ts_val)).date().isoformat() if ts_val else None
+                except Exception:
+                    day = None
+                if day:
+                    day_counts[day] = day_counts.get(day, 0) + 1
+                continue
 
             # For non-chat docs with raw_content, count once per document
             if doc_type != "chat" and raw:
