@@ -387,6 +387,10 @@ def get_document_sources(
                 }
                 for row in chunks_meta
             ])
+        else:
+            # Empty chat document (e.g., default placeholder) - return empty list
+            content = []
+            message_meta = []
     else:
         if raw_content:
             content = raw_content
@@ -465,7 +469,15 @@ def migrate_document(
         # For chat documents, content is already a list; for others it's a string
         if doc_type == 'chat':
             if not isinstance(content, list):
-                stats['error'] = 'Chat document content should be a list'
+                stats['error'] = f'Chat document content should be a list, got {type(content).__name__}'
+                return stats
+            # Empty chat documents should be skipped
+            if len(content) == 0 and not old_chunks:
+                stats['success'] = True
+                stats['skipped'] = True
+                stats['error'] = 'Empty chat document - skipped'
+                if verbose:
+                    print("  [SKIP] Empty chat document; skipping")
                 return stats
             base_chunks = chunker.chunk(content)
         else:

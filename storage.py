@@ -1754,7 +1754,7 @@ class LocalStore:
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT c.document_id, d.doc_type
+                SELECT c.id, c.document_id, c.embedding_id, d.doc_type
                 FROM chunks c
                 JOIN documents d ON c.document_id = d.id
                 WHERE c.id = ? AND c.deleted = 0
@@ -1767,12 +1767,18 @@ class LocalStore:
             doc_id = row["document_id"]
             doc_type = (row["doc_type"] or "").lower()
 
+            # Collect embedding IDs to remove from FAISS
+            embedding_ids_to_remove = []
+
             # For non-chat docs, remove all chunks belonging to the document
             if doc_type != "chat":
-                cur.execute("SELECT id FROM chunks WHERE document_id = ? AND deleted = 0", (doc_id,))
-                doc_chunk_ids = [r["id"] for r in cur.fetchall()]
-                if not doc_chunk_ids:
+                cur.execute("SELECT id, embedding_id FROM chunks WHERE document_id = ? AND deleted = 0", (doc_id,))
+                doc_chunks = cur.fetchall()
+                if not doc_chunks:
                     return False
+                doc_chunk_ids = [r["id"] for r in doc_chunks]
+                embedding_ids_to_remove = [r["embedding_id"] for r in doc_chunks if r["embedding_id"] is not None]
+                
                 cur.execute("UPDATE chunks SET deleted = 1 WHERE document_id = ?", (doc_id,))
                 # Mark document as deleted for bookkeeping (keeps row for audit)
                 cur.execute("UPDATE documents SET status = 'deleted' WHERE id = ?", (doc_id,))
@@ -1780,17 +1786,26 @@ class LocalStore:
             else:
                 # Chat messages: only delete the specific chunk
                 cur.execute("UPDATE chunks SET deleted = 1 WHERE id = ?", (chunk_id,))
-                if cur.rowcount == 0:
-                    return False
                 removed_ids = [chunk_id]
-
-        if removed_ids and self._faiss_index:
+                if row["embedding_id"] is not None:
+                    embedding_ids_to_remove = [row["embedding_id"]]
+        
+        # Remove embeddings from FAISS index after DB transaction
+        if self._faiss_index and embedding_ids_to_remove:
             try:
-                selector = faiss.IDSelectorBatch(np.array(removed_ids, dtype="int64"))
-                self._faiss_index.index.remove_ids(selector)
-            except Exception:
-                pass  # ignore FAISS removal errors
-        return bool(removed_ids)
+                ids_array = np.array(embedding_ids_to_remove, dtype='int64')
+                self._faiss_index.index.remove_ids(ids_array)
+                self._faiss_index.persist()
+                if len(removed_ids) > 0:
+                    # Update index metadata timestamp
+                    now_iso = datetime.now(UTC).isoformat()
+                    with self._connect() as conn:
+                        cur = conn.cursor()
+                        self._write_index_meta(cur, now_iso)
+            except Exception as e:
+                print(f"[warn] Failed to remove {len(embedding_ids_to_remove)} embeddings from FAISS: {e}")
+        
+        return True
 
     def get_rss_item_hashes(self) -> set:
         """Get all processed RSS item hashes."""
