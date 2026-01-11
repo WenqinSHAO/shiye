@@ -591,6 +591,38 @@ def test_raw_content_and_chunk_metadata_preserved():
             assert stored_raw[0]['content'] == "Raw restored content"
 
 
+def test_migration_handles_invalid_chunk_tags():
+    """Migration should tolerate non-JSON chunk tags when rebuilding raw_content."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, Message, Role, cfg = make_store(tmp)
+
+        store.add_messages([Message(content="Bad tags", role=Role.USER)])
+
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT DISTINCT document_id FROM chunks LIMIT 1")
+            doc_id = cur.fetchone()['document_id']
+            cur.execute(
+                "UPDATE documents SET chunk_strategy = NULL, raw_content = NULL, chunk_version = NULL WHERE id = ?",
+                (doc_id,),
+            )
+            cur.execute(
+                "UPDATE chunks SET tags = ? WHERE document_id = ?",
+                ("not-json", doc_id),
+            )
+
+        from migrate_v08 import migrate_document
+
+        stats = migrate_document(store, doc_id, 'chat', verbose=True, dry_run=False)
+        assert stats['success']
+
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT raw_content FROM documents WHERE id = ?", (doc_id,))
+            stored_raw = json.loads(cur.fetchone()['raw_content'])
+            assert stored_raw[0]['tags'] == {}
+
+
 def test_timestamps_preserved():
     """Test that timestamps are preserved during migration."""
     with tempfile.TemporaryDirectory() as tmp:
