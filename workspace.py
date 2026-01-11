@@ -365,7 +365,7 @@ class MemoryWorkspace:
                     # v0.8 chunking metadata
                     heading_path=chunk.heading_path,
                     page_number=chunk.page_number,
-                    seq=chunk.parent_doc_seq
+                    seq=chunk_seqs.get(chunk.id)
                 )
                 hits.append(hit)
             except Exception as e:
