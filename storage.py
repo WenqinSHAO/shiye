@@ -1907,7 +1907,43 @@ class LocalStore:
             chunk_rows = cur.fetchall()
 
         tags = json.loads(doc_row["tags"]) if doc_row["tags"] else {}
+        doc_type = doc_row["doc_type"] if "doc_type" in doc_row.keys() else None
         raw_content = doc_row["raw_content"] if "raw_content" in doc_row.keys() else None
+
+        # Reconstruct chat content from stored JSON for consistent rendering/offets
+        chat_ranges: list[tuple[int, int]] = []
+        if doc_type == "chat" and raw_content:
+            try:
+                data = json.loads(raw_content)
+                # Stored as a list of messages (common for multi-turn/chat migrations)
+                if isinstance(data, list):
+                    parts: list[str] = []
+                    cursor = 0
+                    for item in data:
+                        text = ""
+                        if isinstance(item, dict):
+                            text = item.get("content") or ""
+                        else:
+                            text = str(item)
+                        parts.append(text)
+                        start = cursor
+                        end = start + len(text)
+                        chat_ranges.append((start, end))
+                        cursor = end + 1  # message chunker used +1 offset between messages
+                    raw_content = "\n".join(parts)
+                # Stored as a single message dict (default per-message ingestion)
+                elif isinstance(data, dict):
+                    text = data.get("content") or ""
+                    chat_ranges = [(0, len(text))]
+                    raw_content = text
+                else:
+                    # Unknown shape; fallback to chunk text path
+                    chat_ranges = []
+                    raw_content = None
+            except Exception:
+                chat_ranges = []
+                raw_content = None
+
         content = raw_content if raw_content is not None else ""
 
         derived_ranges: list[tuple[int, int]] = []
@@ -1936,6 +1972,9 @@ class LocalStore:
             else:
                 start = row["char_start"] if "char_start" in row.keys() else None
                 end = row["char_end"] if "char_end" in row.keys() else None
+                # If we reconstructed chat content from JSON, prefer its computed ranges
+                if chat_ranges and idx < len(chat_ranges):
+                    start, end = chat_ranges[idx]
                 if start is None or end is None or end < start:
                     if text:
                         found = content.find(text, search_cursor)
