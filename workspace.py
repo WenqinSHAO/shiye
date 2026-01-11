@@ -250,6 +250,12 @@ class MemoryWorkspace:
                 continue
         
         return hits
+
+    def get_document(self, doc_id: int) -> dict:
+        """Return a document with content and chunk ranges for highlighting."""
+        if self.store:
+            return self.store.get_document_with_chunks(doc_id)
+        return {}
     
     def get_last_search_debug_info(self) -> Optional[dict]:
         """Get debug info from last search operation."""

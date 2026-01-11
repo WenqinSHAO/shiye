@@ -1877,6 +1877,91 @@ class LocalStore:
                 (doc_id,)
             ).fetchone()
             return dict(row) if row else {}
+
+    def get_document_with_chunks(self, doc_id: int) -> dict:
+        """Fetch a document plus all chunks with basic positioning for highlighting."""
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM documents WHERE id = ?", (doc_id,))
+            doc_row = cur.fetchone()
+            if not doc_row:
+                return {}
+            cur.execute(
+                """
+                SELECT * FROM chunks
+                WHERE document_id = ? AND deleted = 0
+                ORDER BY seq ASC
+                """,
+                (doc_id,),
+            )
+            chunk_rows = cur.fetchall()
+
+        tags = json.loads(doc_row["tags"]) if doc_row["tags"] else {}
+        raw_content = doc_row["raw_content"] if "raw_content" in doc_row.keys() else None
+        content = raw_content if raw_content is not None else ""
+
+        derived_ranges: list[tuple[int, int]] = []
+        if raw_content is None:
+            # Reconstruct content and ranges by concatenating chunk text
+            parts = []
+            cursor = 0
+            for idx, row in enumerate(chunk_rows):
+                text = row["text"] or ""
+                start = cursor
+                end = start + len(text)
+                derived_ranges.append((start, end))
+                parts.append(text)
+                cursor = end
+                if idx < len(chunk_rows) - 1:
+                    parts.append("\n\n")
+                    cursor += 2
+            content = "".join(parts)
+
+        chunk_entries = []
+        search_cursor = 0
+        for idx, row in enumerate(chunk_rows):
+            text = row["text"] or ""
+            if raw_content is None:
+                start, end = derived_ranges[idx]
+            else:
+                start = row["char_start"] if "char_start" in row.keys() else None
+                end = row["char_end"] if "char_end" in row.keys() else None
+                if start is None or end is None or end < start:
+                    if text:
+                        found = content.find(text, search_cursor)
+                        if found == -1:
+                            found = content.find(text)
+                        if found != -1:
+                            start = found
+                            end = found + len(text)
+                            search_cursor = end
+            chunk_entries.append(
+                {
+                    "id": row["id"],
+                    "seq": row["seq"],
+                    "text": text,
+                    "char_start": start,
+                    "char_end": end,
+                    "heading_path": row["heading_path"] if "heading_path" in row.keys() else None,
+                    "page_number": row["page_number"] if "page_number" in row.keys() else None,
+                }
+            )
+
+        return {
+            "id": doc_id,
+            "title": doc_row["title"],
+            "doc_type": doc_row["doc_type"],
+            "source": doc_row["source"],
+            "uri": doc_row["uri"],
+            "tags": tags,
+            "created_at": doc_row["created_at"],
+            "updated_at": doc_row["event_at"] or doc_row["created_at"],
+            "ingested_at": doc_row["ingested_at"] if "ingested_at" in doc_row.keys() else None,
+            "chunk_strategy": doc_row["chunk_strategy"] if "chunk_strategy" in doc_row.keys() else None,
+            "chunk_version": doc_row["chunk_version"] if "chunk_version" in doc_row.keys() else None,
+            "content": content,
+            "chunks": chunk_entries,
+        }
     
     def _dense_retrieval(self, request: SearchRequest) -> List[Candidate]:
         """FAISS semantic search with metadata post-filtering."""

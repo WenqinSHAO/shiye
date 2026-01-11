@@ -164,9 +164,9 @@ def index() -> HTMLResponse:
             .note-exit { display: none; }
             body.note-mode .note-exit { display: inline-flex; }
             .history-body { position: relative; }
+            .history-body.is-collapsible { cursor: pointer; }
             .history-body.collapsed { max-height: 140px; overflow: hidden; }
             .history-body.collapsed::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 32px; background: linear-gradient(180deg, transparent, #fff); }
-            .history-expand { margin-top: 6px; font-size: 11px; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel); cursor: pointer; }
             .command-strip { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--subtle); }
             .command-pill { padding: 4px 8px; border-radius: 999px; border: 1px solid var(--border); background: #f3f6fb; color: var(--ink); font-weight: 600; }
             .history-month { margin-bottom: 10px; }
@@ -208,6 +208,23 @@ def index() -> HTMLResponse:
             .search-hit .hit-source { font-size: 12px; }
             .search-hit .hit-source a { color: var(--accent); text-decoration: none; }
             .search-hit .hit-source a:hover { text-decoration: underline; }
+            .hit-toggle { display: inline-flex; align-items: center; gap: 6px; margin: 6px 0; flex-wrap: wrap; }
+            .hit-toggle-label { font-size: 12px; color: var(--subtle); }
+            .hit-toggle-btn { padding: 4px 8px; font-size: 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel); cursor: pointer; color: var(--ink); }
+            .hit-toggle-btn.is-active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+            .hit-toggle-hint { font-size: 11px; color: var(--subtle); }
+            .hit-views { margin-top: 4px; }
+            .hit-view { display: none; }
+            .hit-view.is-active { display: block; }
+            .hit-doc-loading { font-size: 12px; color: var(--subtle); padding: 6px 0; }
+            .hit-doc-content { white-space: normal; line-height: 1.55; background: #f9fbff; border: 1px dashed var(--border); border-radius: 10px; padding: 12px 14px; max-height: 420px; overflow: auto; box-sizing: border-box; }
+            .hit-doc-legend { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--subtle); margin-top: 8px; flex-wrap: wrap; }
+            .legend-item { display: inline-flex; align-items: center; gap: 6px; }
+            .legend-swatch { width: 14px; height: 14px; border-radius: 4px; border: 1px solid var(--border); display: inline-block; box-sizing: border-box; }
+            .legend-primary { background: #fff4d6; border-color: #f6c76a; box-shadow: inset 0 0 0 1px rgba(246,199,106,0.25); }
+            .legend-secondary { background: #e8f1ff; border-color: #c8dcff; }
+            .doc-highlight-main { background: #fff4d6; border: 1px solid #f6c76a; box-shadow: inset 0 0 0 1px rgba(246,199,106,0.28); border-radius: 4px; padding: 1px 2px; }
+            .doc-highlight-secondary { background: #e8f1ff; border: 1px solid #c8dcff; border-radius: 4px; padding: 1px 2px; }
             .hit-scores { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 8px; }
             .hit-score-chips, .score-chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
             .score-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 8px; background: #eef3ff; border: 1px solid var(--border); font-size: 12px; color: var(--ink); }
@@ -343,6 +360,7 @@ def index() -> HTMLResponse:
             const noteDirty = document.getElementById('note-dirty');
             const noteStatus = document.getElementById('noteStatus');
             const noteRecovery = document.getElementById('note-recovery');
+            const docCache = new Map();
             const mathScript = document.getElementById('mathjax-script');
             const getSavedHistoryWidth = () => {
                 const raw = localStorage.getItem(HISTORY_WIDTH_KEY);
@@ -555,6 +573,165 @@ def index() -> HTMLResponse:
                     console.warn('Failed to resolve GitHub URL:', e);
                     return safeImageUrl;
                 }
+            }
+
+            function escapeHtml(str) {
+                return (str || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+            }
+
+            function parseChunkIdList(raw) {
+                if (!raw) return [];
+                return String(raw)
+                    .split(",")
+                    .map((v) => parseInt(v, 10))
+                    .filter((n) => Number.isFinite(n));
+            }
+
+            function buildHighlightedDocument(content, docChunks, shortlistedIds, primaryChunkId) {
+                const text = typeof content === "string" ? content : "";
+                if (!text) return "";
+                const shortIds = new Set((shortlistedIds || []).map((n) => Number(n)).filter((n) => Number.isFinite(n)));
+                const renderMarkdown = (src) => {
+                    try {
+                        return marked.parse(src);
+                    } catch (e) {
+                        return escapeHtml(src).replace(/\\n/g, "<br>");
+                    }
+                };
+                if (!shortIds.size) {
+                    return renderMarkdown(text);
+                }
+                const primaryId = Number(primaryChunkId);
+                const ranges = [];
+                let fallbackCursor = 0;
+                (docChunks || []).forEach((chunk) => {
+                    const cid = Number(chunk.id);
+                    if (!shortIds.has(cid)) return;
+                    let start = Number(chunk.char_start);
+                    let end = Number(chunk.char_end);
+                    const hasStart = Number.isFinite(start);
+                    const hasEnd = Number.isFinite(end);
+                    if (!hasStart || !hasEnd || end < start) {
+                        const snippet = chunk.text || "";
+                        if (!snippet) return;
+                        let found = text.indexOf(snippet, fallbackCursor);
+                        if (found === -1) found = text.indexOf(snippet);
+                        if (found === -1) return;
+                        start = found;
+                        end = found + snippet.length;
+                        fallbackCursor = end;
+                    }
+                    start = Math.max(0, Math.min(start, text.length));
+                    end = Math.max(start, Math.min(end, text.length));
+                    ranges.push({ start, end, id: cid, isPrimary: cid === primaryId });
+                });
+                ranges.sort((a, b) => {
+                    if (a.start === b.start) return a.end - b.end;
+                    return a.start - b.start;
+                });
+                const normalized = [];
+                let cursor = 0;
+                ranges.forEach((r) => {
+                    if (r.end <= cursor) return;
+                    const start = Math.max(r.start, cursor);
+                    const end = r.end;
+                    if (start >= end) return;
+                    normalized.push({ ...r, start, end });
+                    cursor = end;
+                });
+                if (!normalized.length) {
+                    return renderMarkdown(text);
+                }
+                const markers = [];
+                let annotated = text;
+                for (let i = normalized.length - 1; i >= 0; i--) {
+                    const r = normalized[i];
+                    const key = `H${i}_${r.id}_${r.isPrimary ? "P" : "S"}`;
+                    const tokenStart = `<!--${key}_START-->`;
+                    const tokenEnd = `<!--${key}_END-->`;
+                    r.tokenStart = tokenStart;
+                    r.tokenEnd = tokenEnd;
+                    markers.push({ key, id: r.id, isPrimary: r.isPrimary });
+                    annotated = `${annotated.slice(0, r.end)}${tokenEnd}${annotated.slice(r.end)}`;
+                    annotated = `${annotated.slice(0, r.start)}${tokenStart}${annotated.slice(r.start)}`;
+                }
+                let html = renderMarkdown(annotated);
+                markers.forEach((m) => {
+                    const startTag = `<span class="${m.isPrimary ? "doc-highlight-main" : "doc-highlight-secondary"}" data-chunk-id="${m.id}">`;
+                    const endTag = "</span>";
+                    html = html.split(`<!--${m.key}_START-->`).join(startTag);
+                    html = html.split(`<!--${m.key}_END-->`).join(endTag);
+                });
+                return html;
+            }
+
+            async function loadDocumentForHit(hitEl) {
+                if (!hitEl) return;
+                const docId = parseInt(hitEl.dataset.docId, 10);
+                if (!Number.isFinite(docId)) return;
+                const docView = hitEl.querySelector(".hit-view-doc");
+                const contentEl = docView ? docView.querySelector(".hit-doc-content") : null;
+                const loadingEl = docView ? docView.querySelector(".hit-doc-loading") : null;
+                const shortlistedIds = parseChunkIdList(hitEl.dataset.docChunkIds);
+                const primaryChunkId = parseInt(hitEl.dataset.chunkId, 10);
+                if (docView && docView.dataset.loaded === "true") return;
+                if (loadingEl) loadingEl.style.display = "block";
+                try {
+                    let docData = docCache.get(docId);
+                    if (!docData) {
+                        const data = await fetchJson(`/api/documents/${docId}`);
+                        docData = data.document || data;
+                        docCache.set(docId, docData);
+                    }
+                    if (contentEl) {
+                        const html = buildHighlightedDocument(docData.content, docData.chunks, shortlistedIds, primaryChunkId);
+                        contentEl.innerHTML = html || "<div class='hit-doc-loading'>Document content unavailable.</div>";
+                    }
+                    if (loadingEl) loadingEl.style.display = "none";
+                    if (docView) docView.dataset.loaded = "true";
+                } catch (e) {
+                    console.warn("Document load failed", e);
+                    if (loadingEl) loadingEl.style.display = "none";
+                    if (contentEl) {
+                        const msg = e && e.message ? e.message : "Failed to load document.";
+                        contentEl.innerHTML = `<div class='hit-doc-loading'>${escapeHtml(msg)}</div>`;
+                    }
+                }
+            }
+
+            function enhanceSearchResults(container) {
+                if (!container) return;
+                const hits = container.querySelectorAll(".search-hit");
+                if (!hits.length) return;
+                hits.forEach((hit) => {
+                    const buttons = hit.querySelectorAll(".hit-toggle-btn");
+                    const views = hit.querySelectorAll(".hit-view");
+                    const setView = (viewName) => {
+                        buttons.forEach((btn) => {
+                            const active = btn.dataset.view === viewName;
+                            btn.classList.toggle("is-active", active);
+                        });
+                        views.forEach((v) => {
+                            const active = v.dataset.viewName === viewName;
+                            v.classList.toggle("is-active", active);
+                            if (active) {
+                                v.removeAttribute("aria-hidden");
+                            } else {
+                                v.setAttribute("aria-hidden", "true");
+                            }
+                        });
+                        if (viewName === "document") {
+                            loadDocumentForHit(hit);
+                        }
+                    };
+                    buttons.forEach((btn) => {
+                        btn.addEventListener("click", () => {
+                            const viewName = btn.dataset.view || "chunk";
+                            setView(viewName);
+                        });
+                    });
+                    setView("chunk");
+                });
             }
             
             // Store current message context for image rendering
@@ -1184,6 +1361,9 @@ def index() -> HTMLResponse:
                 wrap.appendChild(roleEl);
                 wrap.appendChild(bubble);
                 logEl.appendChild(wrap);
+                if (bubble.querySelector('.search-results')) {
+                    enhanceSearchResults(bubble);
+                }
                 logEl.scrollTop = logEl.scrollHeight;
             }
 
@@ -1334,16 +1514,26 @@ def index() -> HTMLResponse:
                 item.appendChild(roleEl);
                 item.appendChild(body);
                 const shouldCollapse = (m.content || '').length > 360 || (body.textContent || '').length > 360;
+                const setCollapsed = (collapsed) => {
+                    body.classList.toggle('collapsed', collapsed);
+                };
                 if (shouldCollapse) {
-                    body.classList.add('collapsed');
-                    const toggle = document.createElement('button');
-                    toggle.className = 'history-expand';
-                    toggle.textContent = 'Expand';
-                    toggle.onclick = () => {
-                        const collapsed = body.classList.toggle('collapsed');
-                        toggle.textContent = collapsed ? 'Expand' : 'Collapse';
+                    body.classList.add('is-collapsible');
+                    body.title = 'Click to expand or collapse';
+                    const handleToggle = (evt) => {
+                        const target = evt?.target;
+                        if (target && target.closest) {
+                            const interactive = target.closest('a, button, input, textarea, select');
+                            if (interactive) return;
+                        }
+                        if (window.getSelection) {
+                            const selection = window.getSelection();
+                            if (selection && selection.toString()) return;
+                        }
+                        setCollapsed(!body.classList.contains('collapsed'));
                     };
-                    item.appendChild(toggle);
+                    body.addEventListener('click', handleToggle);
+                    setCollapsed(true);
                 }
                 return item;
             }
@@ -1751,6 +1941,17 @@ def get_message_days(limit: int = 180) -> dict:
     return {"days": days}
 
 
+@app.get("/api/documents/{doc_id}")
+def get_document(doc_id: int) -> dict:
+    try:
+        doc = workspace.get_document(doc_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return {"document": doc}
+
+
 @app.delete("/api/messages/{chunk_id}")
 def delete_message(chunk_id: int) -> dict:
     ok = workspace.delete_chunk(chunk_id)
@@ -1952,6 +2153,10 @@ def chat(payload=Body(...)) -> dict:
                 # Format results as HTML
                 results_parts = [f"<div class='search-results'><div class='search-header'>Found {len(hits)} results for: <strong>{clean_query}</strong></div>"]
                 
+                doc_hit_map = {}
+                for h in hits:
+                    doc_hit_map.setdefault(h.doc_id, set()).add(h.chunk_id)
+                
                 for hit in hits:
                     # Format timestamp
                     timestamp = hit.event_at or hit.created_at
@@ -1976,23 +2181,54 @@ def chat(payload=Body(...)) -> dict:
                         location_parts.append(f"<span class='hit-location-item' title='Chunk sequence'>chunk #{hit.seq}</span>")
                     location_html = f"<div class='hit-location'>{' • '.join(location_parts)}</div>" if location_parts else ""
                     
+                    doc_chunk_ids = sorted(doc_hit_map.get(hit.doc_id, set())) or []
+                    doc_chunk_ids_attr = ",".join(str(cid) for cid in doc_chunk_ids)
+                    
                     hit_parts = [
-                        f"<div class='search-hit' data-chunk-id='{hit.chunk_id}' data-doc-id='{hit.doc_id}'>",
+                        f"<div class='search-hit' data-chunk-id='{hit.chunk_id}' data-doc-id='{hit.doc_id}' data-doc-chunk-ids='{doc_chunk_ids_attr}'>",
                         "<div class='hit-header'>",
                         f"<span class='hit-type'>{hit.doc_type}</span>",
                         f"<span class='hit-score'>Score: {score:.3f}</span>",
                         f"<span class='hit-date'>{timestamp_str}</span>",
                         "</div>",
                         f"<div class='hit-title'>{hit.doc_title or 'Untitled'}</div>",
-                        location_html,  # Add location info
-                        f"<div class='hit-text'>{preview_text}</div>",
+                        location_html,
                     ]
                     
                     if hit.doc_source:
                         hit_parts.append(f"<div class='hit-source'><a href='{hit.doc_source}' target='_blank'>{hit.doc_source}</a></div>")
                     
+                    hit_parts.append(
+                        "<div class='hit-toggle'>"
+                        "<span class='hit-toggle-label'>View:</span>"
+                        "<button class='hit-toggle-btn is-active' data-view='chunk' type='button'>Chunk</button>"
+                        "<button class='hit-toggle-btn' data-view='document' type='button'>Document</button>"
+                        "<span class='hit-toggle-hint'>Click to open the full document with highlights.</span>"
+                        "</div>"
+                    )
+                    
+                    hit_parts.append("<div class='hit-views'>")
+                    
+                    # Chunk view (default)
+                    hit_parts.append("<div class='hit-view hit-view-chunk is-active' data-view-name='chunk'>")
+                    hit_parts.append(f"<div class='hit-text'>{preview_text}</div>")
                     if debug:
                         hit_parts.append(render_score_chips(getattr(hit, "scores", {}) or {}))
+                    hit_parts.append("</div>")
+                    
+                    # Document view placeholder
+                    hit_parts.append("<div class='hit-view hit-view-doc' data-view-name='document' aria-hidden='true'>")
+                    hit_parts.append("<div class='hit-doc-loading'>Loading full document…</div>")
+                    hit_parts.append("<div class='hit-doc-content'></div>")
+                    hit_parts.append(
+                        "<div class='hit-doc-legend'>"
+                        "<span class='legend-item'><span class='legend-swatch legend-primary'></span>This result</span>"
+                        "<span class='legend-item'><span class='legend-swatch legend-secondary'></span>Other matches in this document</span>"
+                        "</div>"
+                    )
+                    hit_parts.append("</div>")  # end doc view
+                    
+                    hit_parts.append("</div>")  # end hit-views
                     
                     hit_parts.append("</div>")
                     results_parts.append("".join(hit_parts))
