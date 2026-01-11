@@ -105,6 +105,7 @@ def expand_chunks_with_neighbors(
                             continue
                         texts_after.append(neighbor_text)
                         seq_after.append(neighbor_seq)
+                        total_chars += len(neighbor_text)
                     else:
                         # Core chunk: already accounted for in total_chars
                         continue
