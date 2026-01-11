@@ -3,9 +3,9 @@ from datetime import UTC, datetime
 from typing import List, Optional
 import json
 
-from datatypes import Message, ensure_utc
+from datatypes import Message, Role, ensure_utc
 from embeddings import EmbeddingProvider
-from storage import LocalStore, NoteConflictError
+from storage import LocalStore, NoteConflictError, StoredChunk
 from retrieval import SearchRequest, SearchHit
 from context_assembly import build_chunk_window
 
@@ -209,16 +209,139 @@ class MemoryWorkspace:
             return []
         
         candidates = self.store.search(request)
+        if not candidates:
+            return []
+
+        chunk_ids = [candidate.chunk_id for candidate in candidates]
+
+        chunk_rows = []
+        with self.store._connect() as conn:
+            cur = conn.cursor()
+            placeholders = ",".join("?" for _ in chunk_ids)
+            cur.execute(
+                f"""
+                SELECT c.id as chunk_id,
+                       c.document_id,
+                       c.text,
+                       c.role,
+                       c.created_at,
+                       c.event_at,
+                       c.embedding_id,
+                       c.tags,
+                       c.focus_hint,
+                       c.char_start,
+                       c.char_end,
+                       c.embedding_model,
+                       c.chunk_window,
+                       c.heading_path,
+                       c.page_number,
+                       c.parent_doc_seq,
+                       c.seq,
+                       d.id as doc_id,
+                       d.doc_type,
+                       d.title,
+                       d.uri,
+                       d.source,
+                       d.ingested_at
+                FROM chunks c
+                JOIN documents d ON c.document_id = d.id
+                WHERE c.id IN ({placeholders}) AND c.deleted = 0
+                """,
+                chunk_ids,
+            )
+            chunk_rows = cur.fetchall()
+
+        chunks_by_id = {}
+        docs_by_id = {}
+        chunk_seqs = {}
+        for row in chunk_rows:
+            chunk_id = row["chunk_id"]
+            doc_id = row["doc_id"]
+            chunk_seqs[chunk_id] = row["seq"]
+            chunks_by_id[chunk_id] = StoredChunk(
+                id=chunk_id,
+                document_id=row["document_id"],
+                text=row["text"],
+                role=Role(row["role"]) if row["role"] else Role.USER,
+                created_at=ensure_utc(datetime.fromisoformat(row["created_at"])) if row["created_at"] else datetime.now(UTC),
+                reference_time=ensure_utc(datetime.fromisoformat(row["event_at"])) if row["event_at"] else None,
+                embedding_id=row["embedding_id"],
+                tags=json.loads(row["tags"]) if row["tags"] else None,
+                focus_hint=row["focus_hint"],
+                char_start=row["char_start"] if "char_start" in row.keys() else 0,
+                char_end=row["char_end"] if "char_end" in row.keys() else -1,
+                embedding_model=row["embedding_model"] if "embedding_model" in row.keys() else None,
+                chunk_window=row["chunk_window"] if "chunk_window" in row.keys() else None,
+                heading_path=row["heading_path"] if "heading_path" in row.keys() else None,
+                page_number=row["page_number"] if "page_number" in row.keys() else None,
+                parent_doc_seq=row["parent_doc_seq"] if "parent_doc_seq" in row.keys() else None,
+            )
+            if doc_id not in docs_by_id:
+                docs_by_id[doc_id] = {
+                    "id": doc_id,
+                    "doc_type": row["doc_type"],
+                    "title": row["title"],
+                    "uri": row["uri"],
+                    "source": row["source"],
+                    "ingested_at": row["ingested_at"],
+                }
+
+        chunk_window_by_id = {}
+        chunk_window_targets = {
+            chunk_id: chunk
+            for chunk_id, chunk in chunks_by_id.items()
+            if not chunk.chunk_window
+        }
+        if chunk_window_targets:
+            doc_ids = sorted({chunk.document_id for chunk in chunk_window_targets.values()})
+            with self.store._connect() as conn:
+                cur = conn.cursor()
+                placeholders = ",".join("?" for _ in doc_ids)
+                cur.execute(
+                    f"""
+                    SELECT document_id, seq, text
+                    FROM chunks
+                    WHERE document_id IN ({placeholders}) AND deleted = 0
+                    ORDER BY document_id, seq
+                    """,
+                    doc_ids,
+                )
+                rows = cur.fetchall()
+            chunks_by_doc = {}
+            for row in rows:
+                chunks_by_doc.setdefault(row["document_id"], []).append((row["seq"], row["text"]))
+
+            window_size = 1
+            for chunk_id, chunk in chunk_window_targets.items():
+                seq = chunk_seqs.get(chunk_id)
+                if seq is None:
+                    continue
+                parts = []
+                for neighbor_seq, text in chunks_by_doc.get(chunk.document_id, []):
+                    if neighbor_seq < seq - window_size or neighbor_seq > seq + window_size:
+                        continue
+                    text = text or ""
+                    if len(text) > 200:
+                        if neighbor_seq < seq:
+                            text = "..." + text[-150:]
+                        elif neighbor_seq > seq:
+                            text = text[:150] + "..."
+                        else:
+                            text = text[:100] + " ... " + text[-100:]
+                    parts.append(text)
+                chunk_window_by_id[chunk_id] = " ".join(parts) if parts else None
         
         # Convert Candidate → SearchHit with full metadata
         hits = []
         for rank, candidate in enumerate(candidates, start=1):
             try:
-                chunk = self.store.get_chunk(candidate.chunk_id)
-                doc = self.store.get_document(candidate.doc_id)
+                chunk = chunks_by_id.get(candidate.chunk_id)
+                if not chunk:
+                    raise ValueError(f"Chunk {candidate.chunk_id} not found")
+                doc = docs_by_id.get(candidate.doc_id, {})
                 
                 # Build chunk_window if not already populated
-                chunk_window = chunk.chunk_window
+                chunk_window = chunk.chunk_window or chunk_window_by_id.get(chunk.id)
                 if not chunk_window:
                     chunk_window = build_chunk_window(self.store, chunk.id, window_size=1)
                 
