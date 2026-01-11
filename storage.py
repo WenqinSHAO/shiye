@@ -30,7 +30,7 @@ import numpy as np
 
 from config import DATA_DIR, DB_PATH, MODEL_NAME
 from datatypes import Message, Role, ensure_utc
-from chunking import Chunk, count_tokens, _get_tokenizer
+from chunking import Chunk, HeaderAwareChunker, count_tokens, _get_tokenizer
 from embeddings import EmbeddingProvider
 from vector_store import FaissIndex, faiss
 from retrieval import SearchRequest, Candidate, Reranker, RecencyBooster, TypeBooster, ExactMatchBooster, Deduplicator
@@ -761,6 +761,16 @@ class LocalStore:
 
         embeddings = self._maybe_embed([m.content for m in messages])
 
+        def _use_structure_chunking(text: str) -> bool:
+            """Heuristic: prefer structure-aware chunking for long/markdown chat messages."""
+            if not text:
+                return False
+            if len(text) >= 1200:
+                return True
+            if len(text) >= 600 and re.search(r"(?m)^#{1,6}\s+", text):
+                return True
+            return False
+
         for idx, msg in enumerate(messages):
             base_meta = document_meta.copy() if document_meta else {}
             doc_type = base_meta.get("doc_type") or "chat"
@@ -768,6 +778,85 @@ class LocalStore:
             if not chunk_strategy and doc_type == "chat":
                 chunk_strategy = "per-message"
             chunk_version = base_meta.get("chunk_version", 1)
+            content = msg.content or ""
+
+            # Use structure-aware chunking for long/markdown chat messages
+            if doc_type == "chat" and _use_structure_chunking(content):
+                chunk_strategy = "header-aware"
+                created_at = ensure_utc(msg.created_at) or datetime.now(UTC)
+                reference_time = ensure_utc(msg.reference_time) if msg.reference_time else None
+                chunker = HeaderAwareChunker()
+                chunks = chunker.chunk(content)
+                if not chunks:
+                    chunks = [Chunk(text=content, char_start=0, char_end=len(content), seq=0, token_count=count_tokens(content))]
+                max_tokens = self._get_embedding_max_tokens()
+                if max_tokens:
+                    chunks = self._enforce_chunk_token_limit(chunks, max_tokens)
+                chunk_texts = [c.text for c in chunks]
+                chunk_embeddings = self._maybe_embed(chunk_texts)
+
+                doc_meta = {
+                    "doc_type": doc_type,
+                    "source": base_meta.get("source"),
+                    "uri": base_meta.get("uri"),
+                    "title": base_meta.get("title"),
+                    "tags": base_meta.get("tags"),
+                    "sensitivity": base_meta.get("sensitivity"),
+                    "hash": base_meta.get("hash"),
+                    "status": base_meta.get("status"),
+                    "raw_content": content,
+                    "chunk_strategy": chunk_strategy,
+                    "chunk_version": chunk_version,
+                    "created_at": base_meta.get("created_at") or created_at,
+                    "event_at": base_meta.get("event_at") or reference_time,
+                    "ingested_at": base_meta.get("ingested_at") or datetime.now(UTC),
+                }
+
+                doc_id = self._insert_document(doc_meta)
+
+                with self._connect() as conn:
+                    cur = conn.cursor()
+                    chunk_ids: List[int] = []
+                    for c_idx, chunk in enumerate(chunks):
+                        cur.execute(
+                            """
+                            INSERT INTO chunks (document_id, seq, text, role, token_count, embedding_id, created_at, event_at, tags, focus_hint, char_start, char_end, embedding_model, heading_path, page_number, parent_doc_seq)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                doc_id,
+                                chunk.seq if chunk.seq is not None else c_idx,
+                                chunk.text,
+                                msg.role.value,
+                                chunk.token_count,
+                                None,
+                                created_at.isoformat(),
+                                reference_time.isoformat() if reference_time else None,
+                                json.dumps(msg.metadata) if msg.metadata else None,
+                                msg.metadata.get("focus_hint") if msg.metadata else None,
+                                chunk.char_start,
+                                chunk.char_end,
+                                MODEL_NAME,
+                                chunk.heading_path,
+                                getattr(chunk, "page_number", None),
+                                chunk.seq if chunk.seq is not None else c_idx,
+                            ),
+                        )
+                        chunk_id = cur.lastrowid
+                        chunk_ids.append(chunk_id)
+                        if chunk_embeddings is not None:
+                            emb_vec = chunk_embeddings[c_idx : c_idx + 1]
+                            embedding_id = chunk_id
+                            cur.execute(
+                                "UPDATE chunks SET embedding_id = ? WHERE id = ?",
+                                (embedding_id, chunk_id),
+                            )
+                            if self._faiss_index:
+                                self._faiss_index.add([embedding_id], emb_vec)
+                    if self._faiss_index:
+                        self._write_index_meta(cur, datetime.now(UTC).isoformat())
+                    ids.extend(chunk_ids)
+                continue
 
             # Raw content: persist the single message for fidelity
             raw_content = base_meta.get("raw_content")
@@ -776,9 +865,9 @@ class LocalStore:
                     try:
                         raw_content = json.dumps(msg.to_dict())
                     except Exception:
-                        raw_content = msg.content
+                        raw_content = content
                 else:
-                    raw_content = msg.content
+                    raw_content = content
 
             doc_meta = {
                 "doc_type": doc_type,
@@ -993,6 +1082,7 @@ class LocalStore:
 
         messages: List[Message] = []
         seen_raw_docs: set[int] = set()
+        seen_chat_docs: set[int] = set()
 
         for row in rows:
             doc_id = row["document_id"]
@@ -1000,9 +1090,47 @@ class LocalStore:
             raw = row["doc_raw_content"]
             msg: Optional[Message] = None
 
-            # For chat docs with stored raw_content, skip any derived chunks
+            # For chat docs with stored raw_content
             if doc_type == "chat" and raw:
-                msg = self._row_to_message(row)
+                strategy = ""
+                if "doc_chunk_strategy" in row.keys() and row["doc_chunk_strategy"]:
+                    strategy = row["doc_chunk_strategy"]
+                is_per_message = "per-message" in strategy if strategy else False
+                # Collapse multi-chunk chat docs (structure-aware) into a single message
+                if (not is_per_message) or (row["doc_chunk_count"] and row["doc_chunk_count"] > 1 if "doc_chunk_count" in row.keys() else False):
+                    if doc_id in seen_chat_docs:
+                        continue
+                    seen_chat_docs.add(doc_id)
+                    metadata = json.loads(row["tags"]) if row["tags"] else {}
+                    metadata["chunk_id"] = row["id"]
+                    metadata["doc_id"] = doc_id
+                    metadata["doc_type"] = doc_type
+                    if strategy:
+                        metadata["chunk_strategy"] = strategy
+                    if "doc_chunk_version" in row.keys() and row["doc_chunk_version"] is not None:
+                        metadata["chunk_version"] = row["doc_chunk_version"]
+                    if "doc_chunk_count" in row.keys() and row["doc_chunk_count"] is not None:
+                        metadata["chunk_count"] = row["doc_chunk_count"]
+                    if "seq" in row.keys() and row["seq"] is not None:
+                        metadata["chunk_seq"] = row["seq"]
+                    try:
+                        created_at = ensure_utc(datetime.fromisoformat(row["created_at"])) if row["created_at"] else datetime.now(UTC)
+                    except Exception:
+                        created_at = datetime.now(UTC)
+                    try:
+                        reference_time = ensure_utc(datetime.fromisoformat(row["event_at"])) if row["event_at"] else None
+                    except Exception:
+                        reference_time = None
+                    role_val = row["role"] or Role.SYSTEM.value
+                    msg = Message(
+                        content=str(raw),
+                        role=Role(role_val) if role_val in Role._value2member_map_ else Role.SYSTEM,
+                        created_at=created_at,
+                        reference_time=reference_time,
+                        metadata=metadata,
+                    )
+                else:
+                    msg = self._row_to_message(row)
 
             # For non-chat docs with raw_content, only emit one entry per document (first seen)
             elif raw:
@@ -1066,7 +1194,8 @@ class LocalStore:
             cur.execute(
                 """
                 SELECT c.id, c.document_id, c.seq, c.created_at, c.event_at, c.tags, c.role,
-                       d.doc_type, d.raw_content AS doc_raw_content
+                       d.doc_type, d.raw_content AS doc_raw_content, d.chunk_strategy AS doc_chunk_strategy,
+                       (SELECT COUNT(*) FROM chunks c2 WHERE c2.document_id = c.document_id AND c2.deleted = 0) AS doc_chunk_count
                 FROM chunks c
                 JOIN documents d ON c.document_id = d.id
                 WHERE c.deleted = 0 AND c.created_at IS NOT NULL
@@ -1081,9 +1210,15 @@ class LocalStore:
             doc_id = row["document_id"]
             doc_type = row["doc_type"]
             raw = row["doc_raw_content"]
+            strategy = (row["doc_chunk_strategy"] or "") if "doc_chunk_strategy" in row.keys() else ""
+            is_per_message = "per-message" in strategy if strategy else False
 
             # Count chat messages from raw_content only once per document
             if doc_type == "chat":
+                if not is_per_message or (row["doc_chunk_count"] and row["doc_chunk_count"] > 1 if "doc_chunk_count" in row.keys() else False):
+                    if doc_id in processed_raw_docs:
+                        continue
+                    processed_raw_docs.add(doc_id)
                 ts_val = row["created_at"]
                 try:
                     day = ensure_utc(datetime.fromisoformat(ts_val)).date().isoformat() if ts_val else None

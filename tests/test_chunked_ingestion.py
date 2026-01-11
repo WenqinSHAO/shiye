@@ -261,6 +261,32 @@ def test_default_chat_gets_chunk_strategy(temp_store):
         assert doc_row['chunk_strategy'] == 'per-message'
 
 
+def test_chat_long_message_uses_structure_chunking(temp_store):
+    """Long/markdown chat messages should use structure-aware chunking."""
+    content = """# Section One
+This is a long section with lots of content. """ + ("A" * 800) + """
+
+# Section Two
+More content that should trigger chunking. """ + ("B" * 800)
+
+    chunk_ids = temp_store.add_messages([Message(content=content, role=Role.USER)], document_meta={"doc_type": "chat"})
+    assert len(chunk_ids) >= 2
+
+    with temp_store._connect() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT document_id FROM chunks WHERE id = ?", (chunk_ids[0],))
+        doc_id = cur.fetchone()["document_id"]
+
+        cur.execute("SELECT chunk_strategy, chunk_version FROM documents WHERE id = ?", (doc_id,))
+        doc_row = cur.fetchone()
+        assert doc_row["chunk_strategy"] in ("header-aware", "structure-aware")
+        assert doc_row["chunk_version"] == 1
+
+        cur.execute("SELECT COUNT(*) as count FROM chunks WHERE document_id = ? AND deleted = 0", (doc_id,))
+        count_row = cur.fetchone()
+        assert count_row["count"] >= 2
+
+
 def test_chunked_note_update_removes_old_faiss_embeddings(temp_store):
     """Test that updating a chunked note removes old embeddings from FAISS."""
     # Skip if FAISS not available
