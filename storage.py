@@ -281,6 +281,22 @@ class LocalStore:
                 # Check if FTS5 table exists (independent of column check)
                 cursor = cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='chunks_fts'")
                 fts_exists = cursor.fetchone() is not None
+                needs_rebuild = False
+                
+                if fts_exists:
+                    cursor = cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='chunks_fts'")
+                    row = cursor.fetchone()
+                    if row and row[0] and 'porter' in row[0].lower():
+                        needs_rebuild = True
+                
+                if needs_rebuild:
+                    # Drop old FTS and triggers to rebuild with unicode tokenizer (better CJK support)
+                    cur.execute("DROP TRIGGER IF EXISTS chunks_fts_insert")
+                    cur.execute("DROP TRIGGER IF EXISTS chunks_fts_delete")
+                    cur.execute("DROP TRIGGER IF EXISTS chunks_fts_update")
+                    cur.execute("DROP TABLE IF EXISTS chunks_fts")
+                    fts_exists = False
+                    print("[info] Rebuilding chunks_fts with unicode tokenizer (removed porter)")
                 
                 if fts_exists:
                     # Table already exists, mark FTS5 as available
@@ -306,7 +322,7 @@ class LocalStore:
                             chunk_id UNINDEXED,
                             text,
                             doc_type UNINDEXED,
-                            tokenize='porter unicode61'
+                            tokenize='unicode61'
                         )
                     """)
                 
@@ -503,13 +519,43 @@ class LocalStore:
             return cur.lastrowid
 
     def _row_to_message(self, row: sqlite3.Row) -> Message:
+        """Hydrate a Message preferring raw_content when available."""
         metadata = json.loads(row["tags"]) if row["tags"] else {}
         metadata["chunk_id"] = row["id"]
+        
+        content = row["text"]
+        role = row["role"]
+        created_at = row["created_at"]
+        reference_time = row["event_at"]
+        
+        doc_raw = None
+        if "doc_raw_content" in row.keys():
+            doc_raw = row["doc_raw_content"]
+        elif "raw_content" in row.keys():
+            doc_raw = row["raw_content"]
+        doc_type = row["doc_type"] if "doc_type" in row.keys() else None
+        
+        if doc_raw and doc_type == "chat":
+            try:
+                data = json.loads(doc_raw)
+                if isinstance(data, list) and row["seq"] < len(data):
+                    item = data[row["seq"]]
+                    if isinstance(item, dict):
+                        content = item.get("content", content)
+                        role = item.get("role") or role
+                        created_at = item.get("created_at") or created_at
+                        reference_time = item.get("event_at") or item.get("reference_time") or reference_time
+                        msg_tags = item.get("tags") or item.get("metadata")
+                        if isinstance(msg_tags, dict):
+                            metadata.update(msg_tags)
+            except Exception:
+                pass
+        
         return Message(
-            content=row["text"],
-            role=Role(row["role"]) if row["role"] else Role.USER,
-            created_at=ensure_utc(datetime.fromisoformat(row["created_at"])) if row["created_at"] else datetime.now(UTC),
-            reference_time=ensure_utc(datetime.fromisoformat(row["event_at"])) if row["event_at"] else None,
+            content=content,
+            role=Role(role) if role else Role.USER,
+            created_at=ensure_utc(datetime.fromisoformat(created_at)) if created_at else datetime.now(UTC),
+            reference_time=ensure_utc(datetime.fromisoformat(reference_time)) if reference_time else None,
             metadata=metadata,
         )
 
@@ -739,9 +785,11 @@ class LocalStore:
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT * FROM chunks
+                SELECT c.*, d.doc_type, d.raw_content AS doc_raw_content
+                FROM chunks c
+                JOIN documents d ON c.document_id = d.id
                 WHERE deleted = 0
-                ORDER BY datetime(created_at) DESC
+                ORDER BY datetime(c.created_at) DESC
                 LIMIT ?
                 """,
                 (n,),
@@ -754,9 +802,11 @@ class LocalStore:
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT * FROM chunks
-                WHERE deleted = 0 AND created_at IS NOT NULL AND date(created_at) = ?
-                ORDER BY datetime(created_at)
+                SELECT c.*, d.doc_type, d.raw_content AS doc_raw_content
+                FROM chunks c
+                JOIN documents d ON c.document_id = d.id
+                WHERE c.deleted = 0 AND c.created_at IS NOT NULL AND date(c.created_at) = ?
+                ORDER BY datetime(c.created_at)
                 LIMIT ?
                 """,
                 (day, limit),
@@ -786,9 +836,11 @@ class LocalStore:
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT * FROM chunks
+                SELECT c.*, d.doc_type, d.raw_content AS doc_raw_content
+                FROM chunks c
+                JOIN documents d ON c.document_id = d.id
                 WHERE deleted = 0
-                ORDER BY datetime(created_at) DESC
+                ORDER BY datetime(c.created_at) DESC
                 LIMIT ?
                 """,
                 (n,),
@@ -832,10 +884,12 @@ class LocalStore:
         note_id: int,
         title: str,
     ) -> dict:
+        raw_content = doc_row["raw_content"] if "raw_content" in doc_row.keys() else None
+        content = raw_content if raw_content is not None else (chunk_row["text"] if chunk_row else "")
         return {
             "id": note_id,
             "title": title,
-            "content": chunk_row["text"] if chunk_row else "",
+            "content": content,
             "created_at": ensure_utc(datetime.fromisoformat(created_at)).isoformat() if created_at else None,
             "updated_at": ensure_utc(datetime.fromisoformat(updated_at)).isoformat() if updated_at else None,
             "images": images,
@@ -1240,20 +1294,24 @@ class LocalStore:
         tags = json.loads(doc_row["tags"]) if doc_row["tags"] else {}
         updated_at = doc_row["event_at"] or doc_row["created_at"]
         images = tags.get("images") or []
+        raw_content = doc_row["raw_content"] if "raw_content" in doc_row.keys() else None
         
-        # Reconstruct full content from all chunks
-        if chunk_rows:
-            # Check if this is a chunked note (multiple chunks or has chunk_strategy)
-            chunk_strategy = doc_row["chunk_strategy"] if "chunk_strategy" in doc_row.keys() else None
-            if len(chunk_rows) > 1 or chunk_strategy == "header-aware":
-                # Reconstruct from multiple chunks by concatenating in order
-                content_parts = [row["text"] for row in chunk_rows]
-                content = "\n\n".join(content_parts)
-            else:
-                # Single chunk - use as-is
-                content = chunk_rows[0]["text"]
+        if raw_content is not None:
+            content = raw_content
         else:
-            content = ""
+            # Reconstruct full content from all chunks
+            if chunk_rows:
+                # Check if this is a chunked note (multiple chunks or has chunk_strategy)
+                chunk_strategy = doc_row["chunk_strategy"] if "chunk_strategy" in doc_row.keys() else None
+                if len(chunk_rows) > 1 or chunk_strategy == "header-aware":
+                    # Reconstruct from multiple chunks by concatenating in order
+                    content_parts = [row["text"] for row in chunk_rows]
+                    content = "\n\n".join(content_parts)
+                else:
+                    # Single chunk - use as-is
+                    content = chunk_rows[0]["text"]
+            else:
+                content = ""
         
         return {
             "id": note_id,

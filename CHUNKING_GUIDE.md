@@ -104,6 +104,11 @@ RSS summaries are typically stored as single chunks since they're already concis
 - Uses the embedding model's tokenizer (`all-MiniLM-L6-v2` by default)
 - Falls back to character-based approximation (1 token ≈ 4 chars) if tokenizer unavailable
 - All chunks measured before indexing
+- Chunk text is sliced using tokenizer offsets (not re-decoded) so CJK and other non-spaced languages retain their original text without injected whitespace.
+
+### UI vs. Search Data Sources
+- UI rendering should prefer the document `raw_content` (full original text or chat JSON) to avoid reconstructing from chunks and to keep presentation fidelity.
+- Chunks remain the source of truth for search/recall (dense + sparse) and citations; they carry offsets/metadata optimized for retrieval rather than display.
 
 ### Overlap Strategy
 - **Minimal overlap** (0-30 tokens) during chunking

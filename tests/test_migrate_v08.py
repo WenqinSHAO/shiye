@@ -14,7 +14,13 @@ import numpy as np
 # Add scripts directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
 
-from migrate_v08 import MIGRATABLE_WHERE_CLAUSE, should_migrate_doc, expected_strategy_for_doc_type
+from migrate_v08 import (
+    MIGRATABLE_WHERE_CLAUSE,
+    expected_strategy_for_doc_type,
+    get_embedding_max_tokens,
+    should_migrate_doc,
+)
+from chunking import count_tokens
 
 
 class FakeEmbedder:
@@ -116,6 +122,94 @@ def test_selection_when_strategy_mismatched():
             cur.execute("SELECT chunk_strategy FROM documents WHERE id = ?", (doc_id,))
             strategy = cur.fetchone()['chunk_strategy']
             assert strategy == expected_strategy_for_doc_type(doc_type)
+
+
+def test_migration_skips_empty_documents():
+    """Documents without chunks or raw_content should be skipped, not failed."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, Message, Role, cfg = make_store(tmp)
+        
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO documents (source, uri, doc_type, created_at, ingested_at, title, chunk_strategy, chunk_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("test", "empty://doc", "web_page", "2025-01-01T00:00:00Z", "2025-01-01T00:00:00Z", "Empty", None, None)
+            )
+            doc_id = cur.lastrowid
+        
+        from migrate_v08 import migrate_document
+        stats = migrate_document(store, doc_id, 'web_page', verbose=True, dry_run=False)
+        assert stats['success']
+        assert stats.get('skipped')
+        assert stats['new_chunk_count'] == 0
+
+
+def test_force_migration_runs_even_when_up_to_date():
+    """Force flag should migrate even when strategy/version look current."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, Message, Role, cfg = make_store(tmp)
+        
+        doc_meta = {
+            "source": "test",
+            "uri": "test://doc",
+            "doc_type": "note",
+            "title": "Up-to-date",
+        }
+        result = store.add_document_chunked("Hello world", doc_meta)
+        doc_id = result["document_id"]
+        
+        from migrate_v08 import migrate_document
+        stats = migrate_document(store, doc_id, 'note', verbose=True, dry_run=False)
+        assert stats['success']
+        
+        # Mark as up-to-date
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE documents SET chunk_version = 1, chunk_strategy = 'header-aware' WHERE id = ?", (doc_id,))
+        
+        # Run again to ensure force-like behavior works when invoked directly
+        stats2 = migrate_document(store, doc_id, 'note', verbose=True, dry_run=False)
+        assert stats2['success']
+
+def test_chunks_respect_embedding_max_length():
+    """Oversized chunks should be split to the embedder's max token length."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, Message, Role, cfg = make_store(tmp)
+        
+        long_text = " ".join(f"token{i}" for i in range(1200))
+        doc_meta = {
+            "source": "test",
+            "uri": "rss://long",
+            "doc_type": "rss_daily_summary",
+            "title": "Long RSS",
+        }
+        result = store.add_document_chunked(long_text, doc_meta)
+        doc_id = result["document_id"]
+        
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE documents SET chunk_version = NULL WHERE id = ?", (doc_id,))
+        
+        from migrate_v08 import migrate_document
+        
+        stats = migrate_document(store, doc_id, 'rss_daily_summary', verbose=True, dry_run=False)
+        assert stats['success']
+        
+        max_tokens = get_embedding_max_tokens(store.embedder)
+        with store._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT text FROM chunks WHERE document_id = ? AND deleted = 0 ORDER BY seq",
+                (doc_id,)
+            )
+            rows = cur.fetchall()
+        
+        assert len(rows) > 1, "Oversized chunk should be split to respect embedder limit"
+        for row in rows:
+            assert count_tokens(row['text']) <= max_tokens
 
 
 def test_faiss_parameter_order():

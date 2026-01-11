@@ -118,10 +118,19 @@ class FixedTokenChunker:
         if tokenizer == "fallback":
             return self._chunk_by_chars(text)
         
-        # Encode full text
+        # Encode full text with offsets to preserve original text (avoids CJK spacing issues)
         try:
-            tokens = tokenizer.encode(text, add_special_tokens=False)
+            encoded = tokenizer(
+                text,
+                add_special_tokens=False,
+                return_offsets_mapping=True,
+            )
+            tokens = encoded["input_ids"]
+            offsets = encoded["offset_mapping"]
         except Exception:
+            return self._chunk_by_chars(text)
+        
+        if not tokens or not offsets:
             return self._chunk_by_chars(text)
         
         chunks = []
@@ -140,27 +149,15 @@ class FixedTokenChunker:
                 start_token_idx = end_token_idx - self.overlap_tokens
                 continue
             
-            # Decode chunk text
-            chunk_text = tokenizer.decode(chunk_tokens, skip_special_tokens=True)
-            
-            # Find character offsets by searching in original text
-            # This is approximate but works well in practice
-            if seq == 0:
-                char_start = 0
-            else:
-                # Search for chunk start in remaining text
-                search_start = chunks[-1].char_end - 100 if chunks else 0
-                search_start = max(0, search_start)
-                char_start = text.find(chunk_text[:50], search_start)
-                if char_start == -1:
-                    char_start = chunks[-1].char_end if chunks else 0
-            
-            char_end = char_start + len(chunk_text)
+            # Use offsets to slice original text (no decode artifacts)
+            start_char = offsets[start_token_idx][0]
+            end_char = offsets[end_token_idx - 1][1]
+            chunk_text = text[start_char:end_char]
             
             chunks.append(Chunk(
                 text=chunk_text,
-                char_start=char_start,
-                char_end=char_end,
+                char_start=start_char,
+                char_end=end_char,
                 seq=seq,
                 token_count=len(chunk_tokens)
             ))

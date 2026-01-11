@@ -57,6 +57,9 @@ python scripts/migrate_v08.py --doc-type chat --verbose
 
 # Migrate a specific document by ID
 python scripts/migrate_v08.py --doc-id 42 --verbose
+
+# Force migration even if strategy/version look current
+python scripts/migrate_v08.py --force --dry-run --verbose
 ```
 
 ### Options
@@ -65,12 +68,14 @@ python scripts/migrate_v08.py --doc-id 42 --verbose
 - `--dry-run, -n`: Preview changes without modifying the database
 - `--doc-type TYPE`: Only migrate documents of specific type (chat, note, web_page, paper)
 - `--doc-id ID`: Only migrate a specific document by ID
+- `--force`: Migrate matching documents even if they already have normalized strategy/version
 
 ### What Gets Migrated
 
 Documents are migrated if they meet either condition:
 - `chunk_version` is NULL
 - `chunk_version < 1`
+- `--force` overrides the above selection and migrates everything selected by `--doc-id`/`--doc-type` (or all docs).
 
 The script will:
 1. Retrieve original content from existing chunks

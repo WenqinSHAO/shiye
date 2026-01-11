@@ -24,7 +24,13 @@ import numpy as np
 # Add parent directory to path to import modules
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from chunking import get_chunker_for_doctype, MessageChunker
+from chunking import (
+    Chunk,
+    count_tokens,
+    get_chunker_for_doctype,
+    MessageChunker,
+    _get_tokenizer,
+)
 from config import DB_PATH, DATA_DIR, MODEL_NAME
 from datatypes import Role
 from embeddings import EmbeddingProvider
@@ -55,6 +61,155 @@ chunk_version IS NULL
 """
 
 NORMALIZED_STRATEGIES = {'header-aware', 'sentence-window', 'fixed-token', 'per-message', 'single-chunk'}
+
+
+def get_embedding_max_tokens(embedder) -> Optional[int]:
+    """Infer the maximum token length supported by the embedder/model."""
+    max_tokens = None
+    
+    # Prefer embedder model hints
+    model = getattr(embedder, "model", None) if embedder else None
+    if model:
+        try:
+            if hasattr(model, "get_max_seq_length"):
+                max_tokens = model.get_max_seq_length()
+        except Exception:
+            max_tokens = None
+        if max_tokens is None:
+            max_tokens = getattr(model, "max_seq_length", None)
+    
+    # Fallback to tokenizer config from chunking module
+    if not max_tokens:
+        try:
+            from chunking import _get_tokenizer
+            
+            tok = _get_tokenizer()
+            if tok not in (None, "fallback"):
+                max_tokens = getattr(tok, "model_max_length", None) or getattr(tok, "max_len_single_sentence", None)
+                # Ignore absurdly large sentinel values
+                if max_tokens and max_tokens > 100000:
+                    max_tokens = None
+        except Exception:
+            max_tokens = None
+    
+    try:
+        max_tokens = int(max_tokens) if max_tokens else None
+    except Exception:
+        max_tokens = None
+    
+    # Sensible default for MiniLM-class models
+    if not max_tokens or max_tokens <= 0:
+        max_tokens = 512
+    
+    return max_tokens
+
+
+def enforce_embedding_token_limit(chunks: List[Chunk], max_tokens: int) -> List[tuple[Chunk, int]]:
+    """Ensure chunks do not exceed the embedder's max token length.
+    
+    Returns a list of (chunk, parent_seq) where parent_seq tracks the original
+    chunk sequence before any splitting.
+    """
+    if not chunks or not max_tokens or max_tokens <= 0:
+        return [(c, c.seq) for c in chunks]
+    
+    limited_chunks: List[tuple[Chunk, int]] = []
+    seq = 0
+
+    def _split_chunk_preserving_text(chunk: Chunk) -> List[Chunk]:
+        tok = _get_tokenizer()
+        text = chunk.text
+        
+        def char_split():
+            approx_chars = max_tokens * 4
+            pieces = []
+            start = 0
+            while start < len(text):
+                end = min(len(text), start + approx_chars)
+                piece = text[start:end]
+                pieces.append(Chunk(
+                    text=piece,
+                    char_start=chunk.char_start + start,
+                    char_end=chunk.char_start + end,
+                    seq=0,
+                    heading_path=chunk.heading_path,
+                    page_number=chunk.page_number,
+                    token_count=count_tokens(piece),
+                ))
+                start = end
+            return pieces
+        
+        # Fallback: simple char-based slicing when tokenizer unavailable
+        if tok == "fallback" or tok is None:
+            return char_split()
+        
+        # Use tokenizer offsets to slice without altering text (important for CJK)
+        try:
+            encoded = tok(
+                text,
+                add_special_tokens=False,
+                return_offsets_mapping=True,
+            )
+            offsets = encoded.get("offset_mapping")
+            if not offsets:
+                return char_split()
+        except Exception:
+            return char_split()
+        
+        pieces: List[Chunk] = []
+        start_idx = 0
+        while start_idx < len(offsets):
+            end_idx = min(start_idx + max_tokens, len(offsets))
+            start_char = offsets[start_idx][0]
+            end_char = offsets[end_idx - 1][1]
+            piece_text = text[start_char:end_char]
+            pieces.append(Chunk(
+                text=piece_text,
+                char_start=chunk.char_start + start_char,
+                char_end=chunk.char_start + end_char,
+                seq=0,
+                heading_path=chunk.heading_path,
+                page_number=chunk.page_number,
+                token_count=end_idx - start_idx,
+            ))
+            start_idx = end_idx
+        return pieces
+    
+    for chunk in chunks:
+        parent_seq = chunk.seq
+        token_count = chunk.token_count or count_tokens(chunk.text)
+        
+        if token_count and token_count > max_tokens:
+            sub_chunks = _split_chunk_preserving_text(chunk)
+            if not sub_chunks:
+                sub_chunks = [Chunk(text=chunk.text, char_start=chunk.char_start, char_end=chunk.char_end, seq=0, heading_path=chunk.heading_path, page_number=chunk.page_number, token_count=count_tokens(chunk.text))]
+            
+            for sub in sub_chunks:
+                adjusted = Chunk(
+                    text=sub.text,
+                    char_start=sub.char_start,
+                    char_end=sub.char_end,
+                    seq=seq,
+                    heading_path=chunk.heading_path,
+                    page_number=chunk.page_number,
+                    token_count=sub.token_count,
+                )
+                limited_chunks.append((adjusted, parent_seq))
+                seq += 1
+        else:
+            adjusted = Chunk(
+                text=chunk.text,
+                char_start=chunk.char_start,
+                char_end=chunk.char_end,
+                seq=seq,
+                heading_path=chunk.heading_path,
+                page_number=chunk.page_number,
+                token_count=token_count,
+            )
+            limited_chunks.append((adjusted, parent_seq))
+            seq += 1
+    
+    return limited_chunks
 
 
 def normalize_chunk_strategy(chunker_class_name: str) -> str:
@@ -272,7 +427,8 @@ def migrate_document(
         'success': False,
         'old_chunk_count': 0,
         'new_chunk_count': 0,
-        'error': None
+        'error': None,
+        'skipped': False,
     }
     
     try:
@@ -294,12 +450,13 @@ def migrate_document(
         if verbose:
             print(f"  Migrating doc {doc_id} ({doc_type}), {stats['old_chunk_count']} old chunks")
         
-        if not old_chunks:
-            stats['error'] = 'No content found'
-            return stats
-        
-        if content is None:
-            stats['error'] = 'No content found'
+        content_missing = content is None or (isinstance(content, str) and not content.strip()) or (isinstance(content, list) and len(content) == 0)
+        if not old_chunks and content_missing:
+            stats['success'] = True
+            stats['skipped'] = True
+            stats['error'] = 'No content found - skipped'
+            if verbose:
+                print("  [SKIP] No chunks or raw content found; skipping")
             return stats
         
         # Get appropriate chunker
@@ -310,26 +467,33 @@ def migrate_document(
             if not isinstance(content, list):
                 stats['error'] = 'Chat document content should be a list'
                 return stats
-            chunks = chunker.chunk(content)
+            base_chunks = chunker.chunk(content)
         else:
             if isinstance(content, list):
                 content = '\n'.join(content)
-            chunks = chunker.chunk(content)
+            base_chunks = chunker.chunk(content)
         
-        if not chunks:
+        if not base_chunks:
             stats['error'] = 'Chunker returned no chunks'
             return stats
         
-        stats['new_chunk_count'] = len(chunks)
+        # Ensure chunks respect embedder max token length
+        embed_max_tokens = get_embedding_max_tokens(store.embedder)
+        chunks_with_parent = enforce_embedding_token_limit(base_chunks, embed_max_tokens)
+        if not chunks_with_parent:
+            stats['error'] = 'Chunker returned no chunks after enforcing token limit'
+            return stats
+        
+        stats['new_chunk_count'] = len(chunks_with_parent)
         
         if dry_run:
             if verbose:
-                print(f"  [DRY RUN] Would create {len(chunks)} new chunks")
+                print(f"  [DRY RUN] Would create {len(chunks_with_parent)} new chunks")
             stats['success'] = True
             return stats
         
         # Embed all chunks
-        chunk_texts = [c.text for c in chunks]
+        chunk_texts = [c.text for c, _ in chunks_with_parent]
         embeddings = None
         if store.embedder:
             try:
@@ -374,15 +538,17 @@ def migrate_document(
             # Insert new chunks first (before deleting old ones)
             # This ensures we can roll back if anything fails
             chunk_ids = []
-            for i, chunk in enumerate(chunks):
+            for i, (chunk, parent_seq) in enumerate(chunks_with_parent):
+                # Ensure sequence numbers are strictly increasing for storage
+                chunk.seq = i
                 metadata_source: dict = {}
                 if doc_type == 'chat':
-                    if i < len(message_meta):
-                        metadata_source = message_meta[i] or {}
+                    if parent_seq < len(message_meta):
+                        metadata_source = message_meta[parent_seq] or {}
                     elif message_meta:
                         metadata_source = message_meta[-1] or {}
                 if not metadata_source and old_chunks:
-                    source_row = old_chunks[i] if i < len(old_chunks) else old_chunks[0]
+                    source_row = old_chunks[parent_seq] if parent_seq < len(old_chunks) else old_chunks[0]
                     metadata_source = _chunk_row_to_meta(source_row, doc_tags)
                 
                 tags = metadata_source.get('tags') if metadata_source else doc_tags
@@ -413,7 +579,7 @@ def migrate_document(
                         None,  # embedding_id filled after chunk ID is known
                         created_at, event_at, json.dumps(tags) if tags else None, focus_hint,
                         chunk.char_start, chunk.char_end, MODEL_NAME,
-                        chunk.heading_path, chunk.page_number, chunk.seq
+                        chunk.heading_path, chunk.page_number, parent_seq
                     ),
                 )
                 chunk_ids.append(cur.lastrowid)
@@ -511,6 +677,7 @@ def main():
     parser.add_argument('--dry-run', '-n', action='store_true', help='Dry run (no changes)')
     parser.add_argument('--doc-type', type=str, help='Only migrate documents of this type')
     parser.add_argument('--doc-id', type=int, help='Only migrate this specific document ID')
+    parser.add_argument('--force', action='store_true', help='Force migration even if chunk_strategy/version look up-to-date')
     args = parser.parse_args()
     
     print("=" * 60)
@@ -545,10 +712,12 @@ def main():
             documents = cur.fetchall()
         elif args.doc_type:
             cur.execute(f"{base_query} WHERE doc_type = ? ORDER BY id", (args.doc_type,))
-            documents = [row for row in cur.fetchall() if should_migrate_doc(row)]
+            docs = cur.fetchall()
+            documents = docs if args.force else [row for row in docs if should_migrate_doc(row)]
         else:
             cur.execute(f"{base_query} ORDER BY id")
-            documents = [row for row in cur.fetchall() if should_migrate_doc(row)]
+            docs = cur.fetchall()
+            documents = docs if args.force else [row for row in docs if should_migrate_doc(row)]
     
     if not documents:
         print("\n✓ No documents need migration")
@@ -574,14 +743,16 @@ def main():
     print("Migration Summary")
     print("=" * 60)
     
-    success_count = sum(1 for r in results if r['success'])
-    failed_count = len(results) - success_count
+    success_count = sum(1 for r in results if r['success'] and not r.get('skipped'))
+    skipped_count = sum(1 for r in results if r.get('skipped'))
+    failed_count = len(results) - success_count - skipped_count
     
     total_old_chunks = sum(r['old_chunk_count'] for r in results)
     total_new_chunks = sum(r['new_chunk_count'] for r in results if r['success'])
     
     print(f"Documents processed: {len(results)}")
     print(f"  ✓ Successful: {success_count}")
+    print(f"  ◦ Skipped (no content): {skipped_count}")
     print(f"  ✗ Failed: {failed_count}")
     print(f"\nChunks:")
     print(f"  Old chunks (soft-deleted): {total_old_chunks}")
@@ -592,6 +763,12 @@ def main():
         for r in results:
             if not r['success']:
                 print(f"  Doc {r['doc_id']}: {r['error']}")
+    
+    if skipped_count > 0 and failed_count == 0:
+        print("\nSkipped documents (no chunks/raw_content):")
+        for r in results:
+            if r.get('skipped'):
+                print(f"  Doc {r['doc_id']}")
     
     if args.dry_run:
         print("\n[DRY RUN - No changes were made]")
