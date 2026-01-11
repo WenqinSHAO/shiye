@@ -4,13 +4,110 @@
 
 This document contains a comprehensive code review of the Shiye v0.8 codebase, focusing on retrieval/chunking pipelines, context assembly, orchestrator/chat flow, and the migration script. Issues are ordered by severity.
 
-**Test Status:** 73 passed, 10 failed, 1 skipped out of 84 total tests
+**Test Status:** 82 passed, 1 failed, 1 skipped out of 84 total tests (98% pass rate)
+
+**Update (2026-01-11):** Additional issues discovered and fixed in commit 17285c5:
+- Header-aware chunker preamble preservation
+- Context assembly core chunk anchoring
+- Duplicate token limit enforcement removal
 
 ---
 
-## Critical Issues (Correctness & Regressions)
+## Issues Fixed in Commit 17285c5 (2026-01-11) ✅
 
-### 1. Migration Script: Empty Legacy Chat Documents Not Handled [CRITICAL]
+### A. Header-Aware Chunker: Preamble Content Lost [CRITICAL - FIXED]
+**File:** `chunking.py:385-396, 418-419`  
+**Severity:** Critical - Data loss and misaligned offsets
+
+**Issue:**  
+The header-aware chunker was:
+1. Stripping section text with `.strip()`, causing char_start/char_end to not align with original text
+2. Ignoring pre-heading preamble content, dropping text that appears before the first heading
+
+**Impact:**
+- Preambles were completely lost
+- Citations and char offsets were incorrect
+- Users couldn't locate referenced text in original document
+
+**Fix Applied:**
+```python
+# Capture preamble before first heading
+first_start = matches[0].start()
+if first_start > 0:
+    preamble = text[:first_start]
+    if preamble.strip():
+        sections.append({
+            'text': preamble,
+            'char_start': 0,
+            'char_end': first_start,
+            'heading_path': None,
+            'level': 0
+        })
+
+# Preserve whitespace for accurate offsets
+section_text = text[start:end]  # Not text[start:end].strip()
+```
+
+**Status:** ✅ FIXED - Preambles captured, offsets align with original text
+
+---
+
+### B. Context Assembly: Core Chunk Could Be Excluded [HIGH - FIXED]
+**File:** `context_assembly.py:85-112`  
+**Severity:** High - Incorrect context windows
+
+**Issue:**  
+The neighbor expansion logic could skip the core chunk when `max_expansion_chars` was exceeded by earlier neighbors, producing windows with only adjacent text but not the actual retrieved chunk.
+
+**Root Cause:**
+- Algorithm processed all neighbors sequentially
+- Checked size limit before adding each chunk
+- Core chunk wasn't guaranteed to be included
+
+**Fix Applied:**
+```python
+# Always anchor on the core chunk first
+texts_before = []
+texts_after = []
+core_text = core_text or ""
+total_chars = len(core_text)  # Start with core chunk
+
+# Then add neighbors before/after
+for neighbor in neighbors:
+    if neighbor_seq < core_seq:
+        if total_chars + len(neighbor_text) > max_expansion_chars:
+            continue
+        texts_before.append(neighbor_text)
+    # ... similar for after
+
+expanded_text = ' '.join(texts_before + [core_text] + texts_after)
+```
+
+**Status:** ✅ FIXED - Core chunk always included, proper before/after ordering
+
+---
+
+### C. Duplicate Token Limit Enforcement [MEDIUM - FIXED]
+**File:** `storage.py:967-969` (removed lines)  
+**Severity:** Medium - Performance impact
+
+**Issue:**  
+`add_document_chunked` was calling `_enforce_chunk_token_limit` twice:
+1. After initial chunking (line 968)
+2. Right before embedding (lines 971-973, now removed)
+
+This added unnecessary work during ingestion with no benefit.
+
+**Fix Applied:**
+Removed duplicate enforcement block, keeping only single pass after chunking.
+
+**Status:** ✅ FIXED - Single token limit enforcement
+
+---
+
+## Critical Issues (Previously Identified - Now Fixed) ✅
+
+### 1. Migration Script: Empty Legacy Chat Documents Not Handled [CRITICAL - FIXED]
 **File:** `scripts/migrate_v08.py:435-460`  
 **Severity:** Critical - Migration fails for legacy chat documents
 
@@ -37,46 +134,25 @@ Add fallback to fetch content from the default chat document or handle empty/leg
 2. Attempting to reconstruct chat messages from chat history if available
 3. Properly skip documents that truly have no content
 
+**Status:** ✅ FIXED (commits a7fb74a, ef8c62d)
+
 ---
 
-### 2. FAISS Index: Chunks Not Removed on Deletion [CRITICAL]
-**File:** `storage.py` - `delete_chunk()` method  
+### 2. FAISS Index: Chunks Not Removed on Deletion [CRITICAL - FIXED]
+**File:** `storage.py:1751-1808`  
 **Severity:** Critical - Deleted chunks remain searchable
 
-**Issue:**  
-When a chunk is deleted via `delete_chunk()`, it's marked as deleted in the database but NOT removed from the FAISS index. This causes:
-- Deleted content to still appear in search results
-- Ghost entries that fail to load when retrieved
-- Index bloat over time
-
-**Test Failure:**
-- `test_delete_chunk_marks_deleted_and_removes_from_index` - expects `idx.ntotal == 0` after deletion but gets `1`
-
-**Expected Behavior:**  
-`delete_chunk()` should call `self._faiss_index.index.remove_ids()` to remove the embedding vector from FAISS.
-
-**Fix Needed:**  
-Add FAISS cleanup to `delete_chunk()` method:
-```python
-def delete_chunk(self, chunk_id: int) -> bool:
-    # ... existing soft-delete logic ...
-    
-    # Remove from FAISS if index exists
-    if self._faiss_index and embedding_id is not None:
-        try:
-            self._faiss_index.index.remove_ids(np.array([embedding_id], dtype='int64'))
-            self._faiss_index.persist()
-        except Exception as e:
-            print(f"[warn] Failed to remove chunk from FAISS: {e}")
-    
-    return True
-```
+**Status:** ✅ FIXED (commit a7fb74a) - FAISS vectors now properly removed
 
 ---
 
-### 3. Migration Script: Strategy Not Updated on Re-Migration [HIGH]
-**File:** `scripts/migrate_v08.py:406-671`  
+### 3. Migration Script: Strategy Not Updated on Re-Migration [HIGH - FIXED]
+**File:** `scripts/migrate_v08.py:458-474`  
 **Severity:** High - Incorrect strategy persists after migration
+
+**Status:** ✅ FIXED (commit a7fb74a) - Strategy corrected even for empty documents
+
+---
 
 **Issue:**  
 When a document has the wrong `chunk_strategy` (e.g., 'fixed-token' on a chat document), the migration script successfully re-chunks the document but doesn't update the strategy to the correct value for the document type.
@@ -281,37 +357,39 @@ Add basic validation/sanitization layer for metadata fields, especially if expos
 
 ---
 
-## Recommendations Summary
+## Recommendations Summary (Updated)
 
-### Must Fix (Before v0.8 Release)
-1. ✅ Fix migration script to handle empty/legacy chat documents
-2. ✅ Fix FAISS index removal on chunk deletion
-3. ✅ Fix migration strategy update logic
+### All Critical/High Issues Fixed ✅
+1. ✅ Header-aware chunker preamble preservation (commit 17285c5)
+2. ✅ Context assembly core chunk anchoring (commit 17285c5)
+3. ✅ Duplicate token enforcement removed (commit 17285c5)
+4. ✅ FAISS deletion synchronization (commit a7fb74a)
+5. ✅ Migration empty document handling (commits a7fb74a, ef8c62d)
+6. ✅ Migration strategy correction (commit a7fb74a)
 
-### Should Fix (This Release Cycle)
-4. Update all documentation to v0.8 status
-5. Consolidate duplicate code (score formatting)
-6. Consolidate configuration constants
-7. Fix migration test edge cases
+### Remaining Medium/Low Priority Items (Optional)
+- Consolidate score formatting (storage.py, retrieval.py)
+- Consolidate configuration constants
+- Add end-to-end integration tests
+- Complete docstring coverage
+- Optimize redundant token counting
 
-### Nice to Have (Future Release)
-8. Add end-to-end integration tests
-9. Optimize redundant token counting
-10. Complete docstring coverage
-11. Input validation layer
+### Known Limitations (Documented in commit 17285c5)
+- FAISS index dimension mismatch only warns, no automatic rebuild path
+- Chat flow uses chunk_window (+/-1); richer neighbor expansion not wired to orchestrator yet
 
 ---
 
 ## Positive Findings
 
 The following aspects of the codebase are well-executed:
-- ✅ Comprehensive test coverage for core functionality (73/84 passing)
+- ✅ Comprehensive test coverage for core functionality (82/84 passing - 98%)
 - ✅ Clean separation of concerns (chunking, retrieval, storage)
 - ✅ Good use of dataclasses for type safety
 - ✅ Parameterized SQL queries (security)
 - ✅ Extensive debug/logging infrastructure
 - ✅ Migration script has good error handling and dry-run mode
-- ✅ Documentation is comprehensive (just needs update/consolidation)
+- ✅ Documentation is comprehensive and up-to-date with v0.8
 
 ---
 
