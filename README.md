@@ -40,6 +40,14 @@ uvicorn web:app --reload --port 8000
 
 Visit `http://localhost:8000` in your browser.
 
+### Documentation Map
+
+- **Retrieval pipeline**: [Retrieval.md](Retrieval.md)
+- **Chunking strategies**: [CHUNKING_GUIDE.md](CHUNKING_GUIDE.md)
+- **Debugging retrieval**: [WEB_DEBUG_GUIDE.md](WEB_DEBUG_GUIDE.md) (UI) and [DEBUG_RETRIEVAL_GUIDE.md](DEBUG_RETRIEVAL_GUIDE.md) (pipeline details)
+- **Migration + scripts**: [scripts/README.md](scripts/README.md)
+- **Roadmap / TODO**: [TODO.md](TODO.md)
+
 ### Configuration
 
 Environment variables:
@@ -81,26 +89,7 @@ Environment variables:
 
 ### Enhanced Retrieval & Chunking (v0.8)
 
-Shiye v0.8 features a powerful hybrid search system with intelligent chunking:
-
-**Hybrid Search:**
-1. **Dense Retrieval**: FAISS-based semantic search using sentence embeddings
-2. **Sparse Retrieval**: SQLite FTS5 keyword search with BM25 scoring
-3. **Reciprocal Rank Fusion (RRF)**: Intelligent combination of dense and sparse results
-4. **Cross-Encoder Reranking**: Optional FlashRank reranking for improved top-k accuracy
-5. **Multi-Cue Scoring**: Recency boost, document type preference, exact match detection
-6. **Smart Deduplication**: Keeps only the best chunk per document
-
-**Intelligent Chunking:**
-- Token-aware chunking respects embedding model limits
-- Structure-preserving strategies:
-  - **Notes/Web Pages**: Header-aware chunking (preserves document structure)
-  - **Papers**: Sentence-window chunking (respects sentence boundaries)
-  - **Chat**: Per-message chunking (each message as a unit)
-  - **RSS**: Fixed-token or single-chunk strategies
-- Automatic chunking on ingestion with strategy/version tracking
-- Migration tool available: `scripts/migrate_v08.py`
-- Chunks carry heading/page/seq metadata; search hits render a chunk window with ±1 neighbor for context
+Shiye v0.8 ships hybrid retrieval (dense + sparse + RRF + optional rerank) and token-aware chunking with strategy/version tracking. For the full design notes and configuration details, see [Retrieval.md](Retrieval.md) and [CHUNKING_GUIDE.md](CHUNKING_GUIDE.md).
 
 **Search Filters**:
 - `type:<doc_type>` - Filter by document type (note, web_page, chat, paper, rss_daily_summary)
@@ -217,6 +206,9 @@ Shiye v0.8 features a powerful hybrid search system with intelligent chunking:
 # Install test dependencies
 pip install pytest
 
+# Some fetcher tests require lxml html cleaning support
+pip install lxml_html_clean
+
 # Run all tests
 python -m pytest tests/ -v
 
@@ -257,30 +249,6 @@ shiye/
 ## Vision and Roadmap
 
 See [TODO.md](TODO.md) for detailed planning, architectural decisions, and future milestones.
-
-### Migrating to v0.8
-
-If you have existing data from v0.7 or earlier, use the migration script to upgrade:
-
-```bash
-# Preview changes (recommended first)
-python scripts/migrate_v08.py --dry-run --verbose
-
-# Migrate all documents
-python scripts/migrate_v08.py --verbose
-
-# Migrate specific document type
-python scripts/migrate_v08.py --doc-type note --verbose
-```
-
-The migration script:
-- Re-chunks documents with appropriate v0.8 chunkers
-- Updates chunk metadata (heading_path, page_number, parent_doc_seq)
-- Syncs FAISS index with new embeddings
-- Sets chunk_strategy and chunk_version for all documents
-- Preserves timestamps and roles
-
-For details, see [scripts/README.md](scripts/README.md).
 
 ### Long-term Goals
 

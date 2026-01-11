@@ -2,6 +2,10 @@
 
 A concise guide to the retrieval debug tooling in Shiye. Use this when you need to see what each retriever did, how filters were applied, and how every score contributes to the final ranking.
 
+**Related docs**
+- Web UI walkthrough: [WEB_DEBUG_GUIDE.md](WEB_DEBUG_GUIDE.md)
+- Retrieval design: [Retrieval.md](Retrieval.md)
+
 ## Turn on Debug
 - **CLI / tests**: `export SHIYE_DEBUG_RETRIEVAL=true` then run `python main.py` or `python test_debug_retrieval.py`.
 - **Web UI**: check the `debug` toggle in the header before running `/find …`.

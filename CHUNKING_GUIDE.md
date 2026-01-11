@@ -2,6 +2,11 @@
 
 This document describes the token-aware chunking strategies implemented in Shiye v0.8 for improved retrieval quality and context preservation.
 
+**Related docs**
+- Retrieval overview: [Retrieval.md](Retrieval.md)
+- Migration usage: [scripts/README.md](scripts/README.md)
+- Debugging retrieval: [DEBUG_RETRIEVAL_GUIDE.md](DEBUG_RETRIEVAL_GUIDE.md) and [WEB_DEBUG_GUIDE.md](WEB_DEBUG_GUIDE.md)
+
 ## Overview
 
 Chunking is the process of splitting documents into smaller, semantically meaningful pieces that:
@@ -172,7 +177,7 @@ python scripts/migrate_v08.py --verbose        # migrate everything
 python scripts/migrate_v08.py --doc-type note  # migrate a single type
 ```
 
-The migration normalizes `chunk_strategy/chunk_version`, fills `heading_path/page_number/parent_doc_seq`, and refreshes FAISS embeddings. It requires the embedding model to be available; run `scripts/backup_restore.py` first.
+The migration normalizes `chunk_strategy/chunk_version`, fills `heading_path/page_number/parent_doc_seq`, and refreshes FAISS embeddings. It requires the embedding model to be available; run `scripts/backup_restore.py` first. For full options and output examples, see [scripts/README.md](scripts/README.md).
 
 ## Performance Considerations
 
