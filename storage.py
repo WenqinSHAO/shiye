@@ -30,6 +30,7 @@ import numpy as np
 
 from config import DATA_DIR, DB_PATH, MODEL_NAME
 from datatypes import Message, Role, ensure_utc
+from chunking import Chunk, count_tokens, _get_tokenizer
 from embeddings import EmbeddingProvider
 from vector_store import FaissIndex, faiss
 from retrieval import SearchRequest, Candidate, Reranker, RecencyBooster, TypeBooster, ExactMatchBooster, Deduplicator
@@ -463,6 +464,131 @@ class LocalStore:
                 print(f"[warn] embedding failed: {e}")
         return None
 
+    def _get_embedding_max_tokens(self) -> Optional[int]:
+        """Best-effort detection of the embedder's max token length."""
+        if not self.embedder:
+            return None
+        model = getattr(self.embedder, "model", None)
+        if model is None:
+            return None
+        max_tokens = None
+        try:
+            max_tokens = getattr(model, "max_seq_length", None)
+        except Exception:
+            max_tokens = None
+        if not max_tokens:
+            try:
+                tok = getattr(model, "tokenizer", None)
+                max_tokens = getattr(tok, "model_max_length", None) or getattr(tok, "max_len_single_sentence", None)
+            except Exception:
+                max_tokens = None
+        try:
+            max_tokens = int(max_tokens) if max_tokens else None
+        except Exception:
+            max_tokens = None
+        if max_tokens and 0 < max_tokens < 100000:
+            return max_tokens
+        return None
+
+    def _split_chunk_for_limit(self, chunk: Chunk, max_tokens: int) -> List[Chunk]:
+        """Split a chunk into sub-chunks that respect the embedder's token limit."""
+        if not chunk.text:
+            return [chunk]
+        tok = _get_tokenizer()
+        pieces: List[Chunk] = []
+
+        def _char_split() -> List[Chunk]:
+            approx_chars = max_tokens * 4
+            result: List[Chunk] = []
+            start = 0
+            while start < len(chunk.text):
+                end = min(len(chunk.text), start + approx_chars)
+                piece_text = chunk.text[start:end]
+                result.append(
+                    Chunk(
+                        text=piece_text,
+                        char_start=chunk.char_start + start,
+                        char_end=chunk.char_start + end,
+                        seq=0,
+                        heading_path=chunk.heading_path,
+                        page_number=chunk.page_number,
+                        token_count=count_tokens(piece_text),
+                    )
+                )
+                start = end
+            return result
+
+        if tok in (None, "fallback"):
+            return _char_split()
+
+        try:
+            encoded = tok(chunk.text, add_special_tokens=False, return_offsets_mapping=True)
+            offsets = encoded.get("offset_mapping")
+        except Exception:
+            offsets = None
+
+        if not offsets:
+            return _char_split()
+
+        start_idx = 0
+        while start_idx < len(offsets):
+            end_idx = min(start_idx + max_tokens, len(offsets))
+            start_char = offsets[start_idx][0]
+            end_char = offsets[end_idx - 1][1]
+            piece_text = chunk.text[start_char:end_char]
+            pieces.append(
+                Chunk(
+                    text=piece_text,
+                    char_start=chunk.char_start + start_char,
+                    char_end=chunk.char_start + end_char,
+                    seq=0,
+                    heading_path=chunk.heading_path,
+                    page_number=chunk.page_number,
+                    token_count=end_idx - start_idx,
+                )
+            )
+            start_idx = end_idx
+
+        return pieces
+
+    def _enforce_chunk_token_limit(self, chunks: List[Chunk], max_tokens: int) -> List[Chunk]:
+        """Ensure no chunk exceeds the embedder's token limit."""
+        limited: List[Chunk] = []
+        seq = 0
+        for chunk in chunks:
+            token_count = chunk.token_count if chunk.token_count is not None else None
+            if token_count is None:
+                try:
+                    token_count = count_tokens(chunk.text)
+                except Exception:
+                    token_count = None
+            if token_count is not None and token_count <= max_tokens:
+                limited.append(
+                    Chunk(
+                        text=chunk.text,
+                        char_start=chunk.char_start,
+                        char_end=chunk.char_end,
+                        seq=seq,
+                        heading_path=chunk.heading_path,
+                        page_number=chunk.page_number,
+                        token_count=token_count,
+                    )
+                )
+                seq += 1
+                continue
+
+            for piece in self._split_chunk_for_limit(chunk, max_tokens):
+                piece.seq = seq
+                if piece.token_count is None:
+                    try:
+                        piece.token_count = count_tokens(piece.text)
+                    except Exception:
+                        piece.token_count = None
+                limited.append(piece)
+                seq += 1
+
+        return limited
+
     def _write_index_meta(self, cur, now_iso: str) -> None:
         if not self._faiss_index:
             return
@@ -598,8 +724,20 @@ class LocalStore:
         ids: List[int] = []
         if not messages:
             return ids
+        # If this looks like a non-chat document without a chunking strategy, route through chunked ingestion
+        if document_meta and document_meta.get("doc_type") != "chat" and not document_meta.get("chunk_strategy"):
+            if len(messages) == 1:
+                try:
+                    result = self.add_document_chunked(content=messages[0].content, document_meta=document_meta.copy())
+                    return result.get("chunk_ids", [])
+                except Exception as e:
+                    print(f"[warn] chunked ingestion fallback failed, continuing with add_messages: {e}")
+            else:
+                print("[warn] chunked ingestion skipped: multiple messages provided without chunk_strategy")
+        
         embeddings = self._maybe_embed([m.content for m in messages])
         raw_messages = [m.to_dict() for m in messages]
+        joined_text = "\n\n".join(m.content for m in messages)
         
         # Determine if we're creating a new document or using default chat
         doc_id = self.default_doc_id
@@ -614,23 +752,47 @@ class LocalStore:
                     document_meta.setdefault("raw_content", json.dumps(raw_messages))
                 else:
                     document_meta.setdefault("chunk_version", 1)
+                    document_meta.setdefault("raw_content", joined_text)
                 doc_id = self._insert_document(document_meta)
             except Exception as e:
                 print(f"[warn] failed to insert document, falling back to default: {e}")
                 is_new_document = False
         
-        # For default chat document, ensure it has chunk_strategy set
+        # For default/legacy documents, ensure metadata and raw_content are present
         if not is_new_document:
-            # Update default document with chunk_strategy if not set
             with self._connect() as conn:
                 cur = conn.cursor()
-                cur.execute("SELECT chunk_strategy FROM documents WHERE id = ?", (doc_id,))
+                cur.execute("SELECT doc_type, raw_content, chunk_strategy, chunk_version FROM documents WHERE id = ?", (doc_id,))
                 row = cur.fetchone()
-                if row and row["chunk_strategy"] is None:
-                    cur.execute(
-                        "UPDATE documents SET chunk_strategy = ?, chunk_version = ? WHERE id = ?",
-                        ("per-message", 1, doc_id)
-                    )
+                if row:
+                    doc_type = row["doc_type"] or "chat"
+                    # Always ensure chunk_strategy for default chat doc
+                    if row["chunk_strategy"] is None:
+                        cur.execute(
+                            "UPDATE documents SET chunk_strategy = ?, chunk_version = COALESCE(chunk_version, ?) WHERE id = ?",
+                            ("per-message", 1, doc_id)
+                        )
+                    if doc_type == "chat":
+                        # Merge new messages into raw_content list for UI/history fidelity
+                        existing_raw = []
+                        if row["raw_content"]:
+                            try:
+                                parsed = json.loads(row["raw_content"])
+                                if isinstance(parsed, list):
+                                    existing_raw = parsed
+                            except Exception:
+                                existing_raw = []
+                        merged_raw = existing_raw + raw_messages
+                        cur.execute(
+                            "UPDATE documents SET raw_content = ?, chunk_version = COALESCE(chunk_version, ?) WHERE id = ?",
+                            (json.dumps(merged_raw), 1, doc_id)
+                        )
+                    elif row["raw_content"] is None:
+                        # Non-chat doc without raw_content: persist full text for UI display
+                        cur.execute(
+                            "UPDATE documents SET raw_content = ? WHERE id = ?",
+                            (joined_text, doc_id)
+                        )
         
         with self._connect() as conn:
             cur = conn.cursor()
@@ -717,6 +879,16 @@ class LocalStore:
             from chunking import Chunk
             chunks = [Chunk(text=content, char_start=0, char_end=len(content), seq=0)]
         
+        # Enforce embedder token limit before embedding
+        max_tokens = self._get_embedding_max_tokens()
+        if max_tokens:
+            chunks = self._enforce_chunk_token_limit(chunks, max_tokens)
+        
+        # Enforce embedder token limit before embedding
+        max_tokens = self._get_embedding_max_tokens()
+        if max_tokens:
+            chunks = self._enforce_chunk_token_limit(chunks, max_tokens)
+        
         # Embed all chunks
         chunk_texts = [c.text for c in chunks]
         embeddings = self._maybe_embed(chunk_texts)
@@ -798,6 +970,12 @@ class LocalStore:
         return [self._row_to_message(r) for r in reversed(rows)]
 
     def list_messages_by_day(self, day: str, limit: int = 500) -> List[Message]:
+        """Return messages for a given calendar day using raw documents when available.
+        
+        We purposely fetch all candidate chunks for the day and then filter in
+        Python so we can drop derived chunks (e.g., chat windows) and rely on
+        raw_content instead of chunk text.
+        """
         with self._connect() as conn:
             cur = conn.cursor()
             cur.execute(
@@ -807,29 +985,142 @@ class LocalStore:
                 JOIN documents d ON c.document_id = d.id
                 WHERE c.deleted = 0 AND c.created_at IS NOT NULL AND date(c.created_at) = ?
                 ORDER BY datetime(c.created_at)
-                LIMIT ?
                 """,
-                (day, limit),
+                (day,),
             )
             rows = cur.fetchall()
-        return [self._row_to_message(r) for r in rows]
+
+        messages: List[Message] = []
+        raw_cache: dict[int, list] = {}
+        seen_raw_docs: set[int] = set()
+
+        for row in rows:
+            doc_id = row["document_id"]
+            doc_type = row["doc_type"]
+            raw = row["doc_raw_content"]
+            msg: Optional[Message] = None
+
+            # For chat docs with stored raw_content, skip any derived chunks
+            if doc_type == "chat" and raw:
+                raw_list = raw_cache.get(doc_id)
+                if raw_list is None:
+                    try:
+                        parsed = json.loads(raw)
+                        raw_list = parsed if isinstance(parsed, list) else []
+                    except Exception:
+                        raw_list = []
+                    raw_cache[doc_id] = raw_list
+                if raw_list and row["seq"] is not None and row["seq"] >= len(raw_list):
+                    continue
+                msg = self._row_to_message(row)
+
+            # For non-chat docs with raw_content, only emit one entry per document (first seen)
+            elif raw:
+                if doc_id in seen_raw_docs:
+                    continue
+                seen_raw_docs.add(doc_id)
+                try:
+                    created_at = ensure_utc(datetime.fromisoformat(row["created_at"])) if row["created_at"] else datetime.now(UTC)
+                except Exception:
+                    created_at = datetime.now(UTC)
+                try:
+                    reference_time = ensure_utc(datetime.fromisoformat(row["event_at"])) if row["event_at"] else None
+                except Exception:
+                    reference_time = None
+                metadata = json.loads(row["tags"]) if row["tags"] else {}
+                metadata["chunk_id"] = row["id"]
+                role_val = row["role"] or Role.SYSTEM.value
+                msg = Message(
+                    content=str(raw),
+                    role=Role(role_val) if role_val in Role._value2member_map_ else Role.SYSTEM,
+                    created_at=created_at,
+                    reference_time=reference_time,
+                    metadata=metadata,
+                )
+
+            else:
+                msg = self._row_to_message(row)
+
+            if not msg:
+                continue
+            msg_day = ensure_utc(msg.created_at).date().isoformat()
+            if msg_day != day:
+                continue
+            messages.append(msg)
+
+        messages.sort(key=lambda m: ensure_utc(m.created_at))
+        return messages[:limit]
 
     def list_message_days(self, limit: int = 180) -> List[dict]:
+        """Return available message days with counts, skipping derived chunks."""
         with self._connect() as conn:
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT date(created_at) AS day, COUNT(*) AS count
-                FROM chunks
-                WHERE deleted = 0 AND created_at IS NOT NULL
-                GROUP BY day
-                ORDER BY day DESC
-                LIMIT ?
-                """,
-                (limit,),
+                SELECT c.id, c.document_id, c.seq, c.created_at, c.event_at, c.tags, c.role,
+                       d.doc_type, d.raw_content AS doc_raw_content
+                FROM chunks c
+                JOIN documents d ON c.document_id = d.id
+                WHERE c.deleted = 0 AND c.created_at IS NOT NULL
+                """
             )
             rows = cur.fetchall()
-        return [{"day": row["day"], "count": row["count"]} for row in rows if row["day"]]
+
+        day_counts: dict[str, int] = {}
+        raw_cache: dict[int, list] = {}
+        processed_raw_docs: set[int] = set()
+        processed_chat_docs: set[int] = set()
+
+        for row in rows:
+            doc_id = row["document_id"]
+            doc_type = row["doc_type"]
+            raw = row["doc_raw_content"]
+
+            # Count chat messages from raw_content only once per document
+            if doc_type == "chat" and raw:
+                if doc_id in processed_chat_docs:
+                    continue
+                processed_chat_docs.add(doc_id)
+                raw_list = raw_cache.get(doc_id)
+                if raw_list is None:
+                    try:
+                        parsed = json.loads(raw)
+                        raw_list = parsed if isinstance(parsed, list) else []
+                    except Exception:
+                        raw_list = []
+                    raw_cache[doc_id] = raw_list
+                if raw_list:
+                    for item in raw_list:
+                        ts_val = item.get("created_at") if isinstance(item, dict) else None
+                        try:
+                            day = ensure_utc(datetime.fromisoformat(ts_val)).date().isoformat() if ts_val else None
+                        except Exception:
+                            day = None
+                        if not day:
+                            continue
+                        day_counts[day] = day_counts.get(day, 0) + 1
+                    continue
+                # fall back to chunk timestamps if raw_list empty
+
+            # For non-chat docs with raw_content, count once per document
+            if doc_type != "chat" and raw:
+                if doc_id in processed_raw_docs:
+                    continue
+                processed_raw_docs.add(doc_id)
+                ts_val = row["created_at"] or row["event_at"]
+            else:
+                ts_val = row["created_at"]
+
+            try:
+                day = ensure_utc(datetime.fromisoformat(ts_val)).date().isoformat() if ts_val else None
+            except Exception:
+                continue
+            if not day:
+                continue
+            day_counts[day] = day_counts.get(day, 0) + 1
+
+        ordered_days = sorted(day_counts.items(), key=lambda kv: kv[0], reverse=True)[:limit]
+        return [{"day": day, "count": count} for day, count in ordered_days]
 
     def context_block(self, n: int = 13) -> List[Message]:
         with self._connect() as conn:
@@ -1332,18 +1623,48 @@ class LocalStore:
         return self._row_to_message(row) if row else None
 
     def delete_chunk(self, chunk_id: int) -> bool:
-        """Soft-delete a chunk and remove from FAISS if possible."""
+        """Delete a chunk; for non-chat docs purge the whole document's chunks + embeddings."""
         with self._connect() as conn:
             cur = conn.cursor()
-            cur.execute("UPDATE chunks SET deleted = 1 WHERE id = ?", (chunk_id,))
-            changed = cur.rowcount
-        if changed and self._faiss_index:
+            cur.execute(
+                """
+                SELECT c.document_id, d.doc_type
+                FROM chunks c
+                JOIN documents d ON c.document_id = d.id
+                WHERE c.id = ? AND c.deleted = 0
+                """,
+                (chunk_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return False
+            doc_id = row["document_id"]
+            doc_type = (row["doc_type"] or "").lower()
+
+            # For non-chat docs, remove all chunks belonging to the document
+            if doc_type != "chat":
+                cur.execute("SELECT id FROM chunks WHERE document_id = ? AND deleted = 0", (doc_id,))
+                doc_chunk_ids = [r["id"] for r in cur.fetchall()]
+                if not doc_chunk_ids:
+                    return False
+                cur.execute("UPDATE chunks SET deleted = 1 WHERE document_id = ?", (doc_id,))
+                # Mark document as deleted for bookkeeping (keeps row for audit)
+                cur.execute("UPDATE documents SET status = 'deleted' WHERE id = ?", (doc_id,))
+                removed_ids = doc_chunk_ids
+            else:
+                # Chat messages: only delete the specific chunk
+                cur.execute("UPDATE chunks SET deleted = 1 WHERE id = ?", (chunk_id,))
+                if cur.rowcount == 0:
+                    return False
+                removed_ids = [chunk_id]
+
+        if removed_ids and self._faiss_index:
             try:
-                selector = faiss.IDSelectorBatch(np.array([chunk_id], dtype="int64"))
+                selector = faiss.IDSelectorBatch(np.array(removed_ids, dtype="int64"))
                 self._faiss_index.index.remove_ids(selector)
             except Exception:
                 pass  # ignore FAISS removal errors
-        return bool(changed)
+        return bool(removed_ids)
 
     def get_rss_item_hashes(self) -> set:
         """Get all processed RSS item hashes."""

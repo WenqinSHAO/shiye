@@ -143,26 +143,34 @@ class FlashRankReranker:
         if not passages:
             return candidates
         
-        # Run reranker
+        # Run reranker (handle multiple FlashRank API shapes)
         try:
-            sig = inspect.signature(self.ranker.rerank)
-            param_names = list(sig.parameters.keys())
             reranked = None
-            if len(param_names) == 2:
-                # Newer FlashRank API: rerank(passages)
+            # Preferred keyword form (most stable)
+            try:
+                reranked = self.ranker.rerank(query=query, documents=passages)
+            except Exception:
+                pass
+            # Positional form: rerank(query, passages)
+            if reranked is None:
+                try:
+                    reranked = self.ranker.rerank(query, passages)
+                except Exception:
+                    pass
+            # QueryRequest dataclass form: rerank(QueryRequest)
+            if reranked is None:
+                try:
+                    from flashrank import QueryRequest  # type: ignore
+                    qreq = QueryRequest(query=query, passages=passages)
+                    reranked = self.ranker.rerank(qreq)
+                except Exception:
+                    pass
+            # Bare passages form: rerank(passages)
+            if reranked is None:
                 try:
                     reranked = self.ranker.rerank(passages)
-                except TypeError:
-                    reranked = self.ranker.rerank(query, passages)
-            else:
-                # Older API: rerank(query, passages) or keyworded
-                try:
-                    reranked = self.ranker.rerank(query=query, documents=passages)
-                except TypeError:
-                    try:
-                        reranked = self.ranker.rerank(query, passages)
-                    except TypeError:
-                        reranked = self.ranker.rerank(passages)
+                except Exception:
+                    pass
         except Exception as e:
             print(f"[warn] Reranking failed: {e}")
             return candidates
