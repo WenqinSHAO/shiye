@@ -2,6 +2,10 @@
 
 Utilities to operate on Shiye data without digging into other docs.
 
+**Related docs**
+- Quick start and migration overview: [README.md](../README.md)
+- Chunking and metadata details: [CHUNKING_GUIDE.md](../CHUNKING_GUIDE.md)
+
 ## backup_restore.py
 
 Back up and restore the primary storage files (`shiye.db`, `shiye.faiss`).

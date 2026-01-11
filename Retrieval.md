@@ -4,6 +4,12 @@ Status: v0.8 hybrid retrieval and chunked ingestion are live. Search uses dense 
 
 ---
 
+**Related docs**
+- Chunking details: [CHUNKING_GUIDE.md](CHUNKING_GUIDE.md)
+- Migration usage: [scripts/README.md](scripts/README.md)
+- Debugging (UI): [WEB_DEBUG_GUIDE.md](WEB_DEBUG_GUIDE.md)
+- Debugging (pipeline): [DEBUG_RETRIEVAL_GUIDE.md](DEBUG_RETRIEVAL_GUIDE.md)
+
 ## Retrieval Snapshot (v0.8)
 
 - Hybrid pipeline: FAISS dense search + SQLite FTS5 BM25 fused with RRF; optional FlashRank/BGE rerankers; top-k and RRF constants configurable in `config.py`.
@@ -51,7 +57,7 @@ Query → Parse filters → Dense + Sparse retrieval → RRF fusion → Optional
 ## Debugging & Testing
 
 - Web: enable the Debug toggle and run `/find <query>`; see `WEB_DEBUG_GUIDE.md` or `DEBUG_RETRIEVAL_GUIDE.md` for screenshots and troubleshooting.
-- Tests: `python -m pytest tests/ -v` (includes retrieval and storage coverage).
+- Tests: `python -m pytest tests/ -v` (includes retrieval and storage coverage). Some fetcher tests require `lxml_html_clean` to be installed.
 
 ## References
 
