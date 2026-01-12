@@ -203,32 +203,44 @@ class FixedTokenChunker:
 class SentenceSplitter:
     """Helper to split text into sentences."""
     
-    # Simple sentence boundary detection
-    SENTENCE_ENDINGS = re.compile(r'([.!?]+[\s\n]+|[\n]{2,})')
+    # Sentence boundary detection (ASCII + multilingual punctuation + paragraph breaks)
+    SENTENCE_BOUNDARY = re.compile(
+        r'(?:'
+        r'(?:[.!?]+|[。！？；]+|[｡。．]+)'
+        r'(?:[\"”’\')\]\}]+)?'
+        r'(?:\s+|$)'
+        r'|[\n]{2,}'
+        r')',
+        re.UNICODE
+    )
     
     @staticmethod
     def split(text: str) -> List[str]:
         """Split text into sentences."""
         if not text:
             return []
-        
-        # Split on sentence boundaries
-        parts = SentenceSplitter.SENTENCE_ENDINGS.split(text)
-        
-        # Recombine sentences with their endings
-        sentences = []
-        i = 0
-        while i < len(parts):
-            if i + 1 < len(parts) and SentenceSplitter.SENTENCE_ENDINGS.match(parts[i + 1]):
-                # Combine text with its ending
-                sentences.append(parts[i] + parts[i + 1])
-                i += 2
-            else:
-                if parts[i].strip():
-                    sentences.append(parts[i])
-                i += 1
-        
-        return [s for s in sentences if s.strip()]
+
+        return [text[start:end] for start, end in SentenceSplitter.split_with_spans(text)]
+
+    @staticmethod
+    def split_with_spans(text: str) -> List[Tuple[int, int]]:
+        """Split text into sentence spans (start, end) preserving separators."""
+        if not text:
+            return []
+
+        spans: List[Tuple[int, int]] = []
+        start = 0
+
+        for match in SentenceSplitter.SENTENCE_BOUNDARY.finditer(text):
+            end = match.end()
+            if end > start:
+                spans.append((start, end))
+                start = end
+
+        if start < len(text):
+            spans.append((start, len(text)))
+
+        return spans
 
 
 class SentenceWindowChunker:
@@ -324,6 +336,7 @@ class HeaderAwareChunker:
         self.max_tokens = max_tokens
         self.min_section_tokens = min_section_tokens
         self.fixed_chunker = FixedTokenChunker(chunk_size=max_tokens, overlap_tokens=0)
+        self.sentence_splitter = SentenceSplitter()
     
     def chunk(self, text: str, metadata: Optional[dict] = None) -> List[Chunk]:
         """Split text by headers, then chunk long sections."""
@@ -357,13 +370,13 @@ class HeaderAwareChunker:
                 ))
                 seq += 1
             else:
-                # Split long section using fixed chunker
-                section_chunks = self.fixed_chunker.chunk(section_text, metadata)
+                # Split long section using sentence-aware packing
+                section_chunks = self._chunk_section_sentences(section, metadata)
                 for chunk in section_chunks:
                     chunks.append(Chunk(
                         text=chunk.text,
-                        char_start=section['char_start'] + chunk.char_start,
-                        char_end=section['char_start'] + chunk.char_end,
+                        char_start=chunk.char_start,
+                        char_end=chunk.char_end,
                         seq=seq,
                         heading_path=section['heading_path'],
                         token_count=chunk.token_count
@@ -428,6 +441,83 @@ class HeaderAwareChunker:
                 })
         
         return sections
+
+    def _chunk_section_sentences(self, section: dict, metadata: Optional[dict] = None) -> List[Chunk]:
+        """Split a long section using sentence-aware packing."""
+        section_text = section['text']
+        section_start = section['char_start']
+
+        spans = self.sentence_splitter.split_with_spans(section_text)
+        if not spans:
+            return []
+
+        chunks: List[Chunk] = []
+        current_start = None
+        current_end = None
+        current_tokens = 0
+
+        for start, end in spans:
+            sentence_text = section_text[start:end]
+            sentence_tokens = count_tokens(sentence_text)
+
+            if sentence_tokens > self.max_tokens:
+                if current_tokens > 0 and current_start is not None and current_end is not None:
+                    chunk_text = section_text[current_start:current_end]
+                    chunks.append(Chunk(
+                        text=chunk_text,
+                        char_start=section_start + current_start,
+                        char_end=section_start + current_end,
+                        seq=0,
+                        token_count=current_tokens
+                    ))
+                    current_start = None
+                    current_end = None
+                    current_tokens = 0
+
+                sentence_chunks = self.fixed_chunker.chunk(sentence_text, metadata)
+                for chunk in sentence_chunks:
+                    chunks.append(Chunk(
+                        text=chunk.text,
+                        char_start=section_start + start + chunk.char_start,
+                        char_end=section_start + start + chunk.char_end,
+                        seq=0,
+                        token_count=chunk.token_count
+                    ))
+                continue
+
+            if current_tokens > 0 and current_tokens + sentence_tokens > self.max_tokens:
+                if current_start is not None and current_end is not None:
+                    chunk_text = section_text[current_start:current_end]
+                    chunks.append(Chunk(
+                        text=chunk_text,
+                        char_start=section_start + current_start,
+                        char_end=section_start + current_end,
+                        seq=0,
+                        token_count=current_tokens
+                    ))
+                current_start = None
+                current_end = None
+                current_tokens = 0
+
+            if current_tokens == 0:
+                current_start = start
+                current_end = end
+                current_tokens = sentence_tokens
+            else:
+                current_end = end
+                current_tokens += sentence_tokens
+
+        if current_tokens > 0 and current_start is not None and current_end is not None:
+            chunk_text = section_text[current_start:current_end]
+            chunks.append(Chunk(
+                text=chunk_text,
+                char_start=section_start + current_start,
+                char_end=section_start + current_end,
+                seq=0,
+                token_count=current_tokens
+            ))
+
+        return chunks
 
 
 class MessageChunker:

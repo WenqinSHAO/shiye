@@ -24,8 +24,9 @@ Notes use `HeaderAwareChunker` which:
 - Splits by markdown headers (`#`, `##`, `###`, etc.)
 - Preserves heading hierarchy (e.g., "Introduction > Background > Related Work")
 - Respects token limits (300 tokens max per chunk)
-- Splits long sections further if needed
+- Splits long sections further if needed, packing whole sentences into sub-chunks
 - Keeps pre-heading preambles and preserves whitespace so `char_start/char_end` align to the original text
+- Uses multilingual sentence boundaries to keep CJK punctuation intact (e.g., `。！？；`)
 
 **Configuration**:
 ```python
@@ -59,6 +60,7 @@ Web pages use the same `HeaderAwareChunker` with:
 - HTML heading detection (h1, h2, h3, etc.)
 - Boilerplate removal (navigation, footers)
 - URL and title preservation in metadata
+- Sentence-aware splitting for oversized sections to preserve sentence integrity in CJK content
 
 ### 3. Papers (Academic/PDF)
 **Strategy**: Sentence Window Chunking
@@ -129,8 +131,7 @@ RSS summaries are typically stored as single chunks since they're already concis
 
 ## Known Issues / Future Fixes
 
-- **Chinese notes can fragment mid-sentence.** With `HeaderAwareChunker(max_tokens=300)` and `all-MiniLM-L6-v2`, Chinese tokens are often ~1 char each. Sections longer than ~300 chars (e.g., note “十块钱的“夜行灯”，怎么藏着一整套红外科学与工程史”, doc_id=29) are split by the fixed-token fallback, producing short chunks (e.g., chunk id 504: “因为“人-背景”的红外对比度变小，信号幅度下降，等效探测距离缩短、漏检概率上升。很多工程”) that do not align to sentence boundaries. This shows up in document view highlights for `/find` as tiny spans.
-- **Planned mitigations (requires re-chunking affected docs):** Increase note chunk size and add overlap (e.g., ~480–512 tokens with ~40 overlap), or add a sentence-aware split inside the header-aware chunker (or switch notes to a sentence-window path for sub-800 char sections). Keep short sections intact; only long sections should be split. Re-ingest/re-chunk is needed to update existing data.
+- **Very long single sentences may still be token-sliced.** When a single sentence exceeds `max_tokens`, the chunker falls back to token slicing for that sentence only. Re-ingest/re-chunk is needed to update existing data.
 - **Doc-view highlight wraps collapse when chunks span block elements.** For note doc_id=11 (“Thought Communication in Multiagent Collaboration”), chunk id 175 (`## 分类/标签` + tag line) highlights only the header in document view. The chunk itself is short and relevant (contains “Representation Learning”, “Multi-Agent”), so retrieval is expected; the visual issue is our marker-based highlight wrapping block elements with inline spans, which browsers normalize by closing the span before the block. Future fix: use block-safe wrappers (e.g., wrap per-block or use CSS overlays) and/or avoid chunking tiny header+tag sections into standalone chunks.
 - **Troubleshooting the doc-view collapse (same example, chunk 175):**
   - The chunk boundary is correct: `char_start=378`, `char_end=539`, covering the full heading and tag line in `raw_content`.
