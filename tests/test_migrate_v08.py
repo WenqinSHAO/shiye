@@ -81,7 +81,7 @@ def test_selection_when_strategy_missing():
         
         with store._connect() as conn:
             cur = conn.cursor()
-            cur.execute("UPDATE documents SET chunk_strategy = NULL WHERE id = (SELECT id FROM documents LIMIT 1)")
+            cur.execute("UPDATE documents SET chunk_strategy = NULL WHERE id = (SELECT id FROM documents WHERE status IS NULL LIMIT 1)")
             cur.execute(f"SELECT COUNT(*) as cnt FROM documents WHERE {MIGRATABLE_WHERE_CLAUSE}")
             row = cur.fetchone()
             assert row['cnt'] == 1, "Legacy document should be picked up for migration"
@@ -96,7 +96,7 @@ def test_selection_when_strategy_mismatched():
         
         with store._connect() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT id, doc_type FROM documents LIMIT 1")
+            cur.execute("SELECT id, doc_type FROM documents WHERE status IS NULL LIMIT 1")
             row = cur.fetchone()
             doc_id = row['id']
             doc_type = row['doc_type']

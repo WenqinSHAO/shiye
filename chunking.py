@@ -205,15 +205,15 @@ class SentenceSplitter:
     
     # Sentence boundary detection (ASCII + multilingual punctuation + paragraph breaks)
     SENTENCE_BOUNDARY = re.compile(
-        r'(?:'
+        r"(?:"
         # ASCII punctuation requiring whitespace/end
-        r'(?:[.!?]+(?:[\""'\')\]\}]+)?(?:\s+|$))'
+        r"(?:[.!?]+(?:[\"'\)\]\}]+)?(?:\s+|$))"
         # CJK punctuation that does NOT require whitespace
-        r'|(?:[。！？；]+|[｡。．]+)(?:[\""'\')\]\}]+)?'
+        r"|(?:[。！？；]+|[｡。．]+)(?:[\"'\)\]\}]+)?"
         # Paragraph breaks
-        r'|[\n]{2,}'
-        r')',
-        re.UNICODE
+        r"|[\n]{2,}"
+        r")",
+        re.UNICODE,
     )
     
     @staticmethod

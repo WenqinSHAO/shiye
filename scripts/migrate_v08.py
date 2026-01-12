@@ -50,9 +50,12 @@ END
 """
 
 TARGET_CHUNK_VERSION = 2
+EXCLUDED_STATUSES = {"deleted", "default_chat"}
 
 MIGRATABLE_WHERE_CLAUSE = f"""
-chunk_version IS NULL
+(status IS NULL OR status NOT IN ('deleted', 'default_chat'))
+AND (
+    chunk_version IS NULL
     OR chunk_version < {TARGET_CHUNK_VERSION}
     OR chunk_strategy IS NULL
     OR chunk_strategy NOT IN ('header-aware', 'sentence-window', 'fixed-token', 'per-message', 'single-chunk')
@@ -61,6 +64,7 @@ chunk_version IS NULL
         AND {EXPECTED_STRATEGY_CASE} IS NOT NULL
         AND chunk_strategy != {EXPECTED_STRATEGY_CASE}
     )
+)
 """
 
 NORMALIZED_STRATEGIES = {'header-aware', 'sentence-window', 'fixed-token', 'per-message', 'single-chunk'}
@@ -185,6 +189,10 @@ def expected_strategy_for_doc_type(doc_type: Optional[str]) -> Optional[str]:
 
 def should_migrate_doc(doc_row) -> bool:
     """Determine if a document row should be migrated."""
+    status = doc_row["status"] if "status" in doc_row.keys() else None
+    if status in EXCLUDED_STATUSES:
+        return False
+    
     strategy = doc_row['chunk_strategy']
     version = doc_row['chunk_version']
     
@@ -712,7 +720,7 @@ def main():
     # Get documents to migrate
     with store._connect() as conn:
         cur = conn.cursor()
-        base_query = "SELECT id, doc_type, title, chunk_strategy, chunk_version FROM documents"
+        base_query = "SELECT id, doc_type, title, chunk_strategy, chunk_version, status FROM documents"
         
         if args.doc_id:
             # Migrate specific document
@@ -720,19 +728,19 @@ def main():
                 f"{base_query} WHERE id = ?",
                 (args.doc_id,)
             )
-            documents = cur.fetchall()
+            documents = [row for row in cur.fetchall() if (row["status"] or None) not in EXCLUDED_STATUSES]
         elif args.doc_type:
             cur.execute(f"{base_query} WHERE doc_type = ? ORDER BY id", (args.doc_type,))
             docs = cur.fetchall()
             if args.reindex_all or args.force:
-                documents = docs
+                documents = [row for row in docs if (row["status"] or None) not in EXCLUDED_STATUSES]
             else:
                 documents = [row for row in docs if should_migrate_doc(row)]
         else:
             cur.execute(f"{base_query} ORDER BY id")
             docs = cur.fetchall()
             if args.reindex_all or args.force:
-                documents = docs
+                documents = [row for row in docs if (row["status"] or None) not in EXCLUDED_STATUSES]
             else:
                 documents = [row for row in docs if should_migrate_doc(row)]
     
