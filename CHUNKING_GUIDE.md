@@ -148,6 +148,13 @@ Each chunk stores:
 - `token_count`: Actual measured tokens
 - `embedding_model`: Model used for embedding
 
+## Chunk Versioning
+
+Shiye tracks document-level chunking with `documents.chunk_version`:
+
+- **Version 1**: Initial v0.8 normalization pass (strategy normalization + metadata backfill).
+- **Version 2**: Full reindex pass that rebuilds chunks from `raw_content` (or reconstructed chat JSON), regenerates embeddings, and refreshes FAISS/FTS metadata. This is the recommended migration path when upgrading versions because it always reuses the latest chunkers.
+
 ## Context Assembly
 
 At retrieval time, chunks can be expanded with neighbors:
@@ -174,11 +181,12 @@ Existing chunks (pre-v0.8) keep working, but you can re-chunk/re-embed them with
 
 ```bash
 python scripts/migrate_v08.py --dry-run -v     # preview
-python scripts/migrate_v08.py --verbose        # migrate everything
+python scripts/migrate_v08.py --reindex-all -v  # full reindex with latest chunkers
+python scripts/migrate_v08.py --verbose        # migrate only out-of-date docs
 python scripts/migrate_v08.py --doc-type note  # migrate a single type
 ```
 
-The migration normalizes `chunk_strategy/chunk_version`, fills `heading_path/page_number/parent_doc_seq`, and refreshes FAISS embeddings. It requires the embedding model to be available; run `scripts/backup_restore.py` first. For full options and output examples, see [scripts/README.md](scripts/README.md).
+The migration normalizes `chunk_strategy/chunk_version`, fills `heading_path/page_number/parent_doc_seq`, rebuilds chunks from `raw_content`, and refreshes FAISS/FTS embeddings. It requires the embedding model to be available; run `scripts/backup_restore.py` first. For full options and output examples, see [scripts/README.md](scripts/README.md).
 
 ## Performance Considerations
 
