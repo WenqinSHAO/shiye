@@ -28,7 +28,7 @@ python scripts/backup_restore.py --data-dir /path/to/data restore /tmp/shiye-bac
 
 ## migrate_v08.py
 
-Migration script for v0.7 to v0.8 chunking enhancements. This script re-chunks existing documents with the new v0.8 chunkers and properly updates:
+Migration script for v0.7+ data to the latest chunking format (chunk_version=2). This script re-chunks existing documents with the latest chunkers and properly updates:
 
 - **FAISS index**: Uses correct parameter order (`add(ids, vectors)`) with automatic persistence
 - **Chat documents**: Passes message list to MessageChunker instead of concatenated string (avoids per-character chunking)
@@ -53,7 +53,10 @@ Migration script for v0.7 to v0.8 chunking enhancements. This script re-chunks e
 # Dry run to preview changes (recommended first)
 python scripts/migrate_v08.py --dry-run --verbose
 
-# Migrate all documents
+# Reindex all documents using raw_content and the latest chunkers
+python scripts/migrate_v08.py --reindex-all --verbose
+
+# Migrate documents that need normalization only
 python scripts/migrate_v08.py --verbose
 
 # Migrate only a specific document type
@@ -73,21 +76,23 @@ python scripts/migrate_v08.py --force --dry-run --verbose
 - `--doc-type TYPE`: Only migrate documents of specific type (chat, note, web_page, paper)
 - `--doc-id ID`: Only migrate a specific document by ID
 - `--force`: Migrate matching documents even if they already have normalized strategy/version
+- `--reindex-all`: Main migration path across versions; rebuild chunks for all selected docs using raw_content and the latest chunkers
 
 ### What Gets Migrated
 
 Documents are migrated if they meet either condition:
 - `chunk_version` is NULL
-- `chunk_version < 1`
+- `chunk_version < 2`
 - `--force` overrides the above selection and migrates everything selected by `--doc-id`/`--doc-type` (or all docs).
+- `--reindex-all` ignores strategy/version and rebuilds chunks from raw_content for all selected docs (recommended for version upgrades).
 
 The script will:
-1. Retrieve original content from existing chunks
-2. Re-chunk using the appropriate v0.8 chunker for the document type
+1. Retrieve original content from `raw_content` (or reconstructed chat JSON)
+2. Re-chunk using the latest chunker for the document type
 3. Soft-delete old chunks (set `deleted = 1`)
 4. Insert new chunks with proper metadata
 5. Generate embeddings (required) and store them in FAISS when the index is available
-6. Set `chunk_strategy` and `chunk_version = 1` on the document
+6. Set `chunk_strategy` and `chunk_version = 2` on the document
 
 ### Safety
 
@@ -101,7 +106,7 @@ The script will:
 
 ```
 ============================================================
-Document Migration: v0.7 → v0.8
+Document Migration: v0.7+ → latest chunking
 ============================================================
 ✓ Initialized embedder: sentence-transformers/all-MiniLM-L6-v2
 ✓ Connected to database: ~/.shiye/shiye.db

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Migration script for v0.7 to v0.8 chunking enhancements.
+Migration script for v0.7+ data to the latest chunking format (chunk_version=2).
 
-This script re-chunks existing documents with the new v0.8 chunkers and updates:
+This script re-chunks existing documents with the latest chunkers and updates:
 - Chunks with proper metadata (heading_path, page_number, parent_doc_seq)
 - Documents with chunk_strategy and chunk_version
 - FAISS index with proper embeddings
@@ -49,9 +49,11 @@ CASE doc_type
 END
 """
 
+TARGET_CHUNK_VERSION = 2
+
 MIGRATABLE_WHERE_CLAUSE = f"""
 chunk_version IS NULL
-    OR chunk_version < 1
+    OR chunk_version < {TARGET_CHUNK_VERSION}
     OR chunk_strategy IS NULL
     OR chunk_strategy NOT IN ('header-aware', 'sentence-window', 'fixed-token', 'per-message', 'single-chunk')
     OR (
@@ -186,7 +188,7 @@ def should_migrate_doc(doc_row) -> bool:
     strategy = doc_row['chunk_strategy']
     version = doc_row['chunk_version']
     
-    if strategy is None or version is None or version < 1:
+    if strategy is None or version is None or version < TARGET_CHUNK_VERSION:
         return True
     if strategy not in NORMALIZED_STRATEGIES:
         return True
@@ -279,7 +281,10 @@ def _chunk_row_to_meta(row, doc_tags: dict) -> dict:
 
 
 def get_document_sources(
-    store: LocalStore, doc_id: int, doc_type: str
+    store: LocalStore,
+    doc_id: int,
+    doc_type: str,
+    prefer_raw_content: bool = False,
 ) -> tuple[Optional[Union[str, List[str]]], List[dict], Optional[str], Optional[dict], List[dict]]:
     """Load document content, metadata, and raw content for migration."""
     with store._connect() as conn:
@@ -311,6 +316,30 @@ def get_document_sources(
         if messages_from_raw:
             content = messages_from_raw
             message_meta = meta_from_raw or []
+        elif chunks_meta and prefer_raw_content:
+            def _safe_chunk_tags(value: Optional[str]) -> dict:
+                if not value:
+                    return doc_tags or {}
+                try:
+                    return json.loads(value)
+                except Exception:
+                    return doc_tags or {}
+            # Build raw_content from existing chunks so we persist a source copy
+            raw_content = json.dumps([
+                {
+                    "content": row['text'],
+                    "role": row['role'],
+                    "created_at": row['created_at'],
+                    "event_at": row['event_at'],
+                    "tags": _safe_chunk_tags(row['tags']),
+                    "focus_hint": row['focus_hint'],
+                }
+                for row in chunks_meta
+            ])
+            messages_from_raw, meta_from_raw = _parse_chat_raw_content(raw_content)
+            if messages_from_raw:
+                content = messages_from_raw
+                message_meta = meta_from_raw or []
         elif chunks_meta:
             content = [row['text'] for row in chunks_meta]
             message_meta = [_chunk_row_to_meta(row, doc_tags) for row in chunks_meta]
@@ -358,7 +387,8 @@ def migrate_document(
     doc_id: int,
     doc_type: str,
     verbose: bool = False,
-    dry_run: bool = False
+    dry_run: bool = False,
+    reindex_all: bool = False,
 ) -> dict:
     """Migrate a single document to v0.8 chunking format.
     
@@ -382,7 +412,12 @@ def migrate_document(
     }
     
     try:
-        content, message_meta, raw_source, doc_row, old_chunks = get_document_sources(store, doc_id, doc_type)
+        content, message_meta, raw_source, doc_row, old_chunks = get_document_sources(
+            store,
+            doc_id,
+            doc_type,
+            prefer_raw_content=reindex_all,
+        )
         original_chunk_strategy = doc_row['chunk_strategy'] if doc_row else None
         original_chunk_version = doc_row['chunk_version'] if doc_row else None
         doc_created_at = doc_row['created_at'] if doc_row else None
@@ -409,8 +444,8 @@ def migrate_document(
                     with store._connect() as conn:
                         cur = conn.cursor()
                         cur.execute(
-                            "UPDATE documents SET chunk_strategy = ?, chunk_version = 1 WHERE id = ?",
-                            (expected_strategy, doc_id)
+                            "UPDATE documents SET chunk_strategy = ?, chunk_version = ? WHERE id = ?",
+                            (expected_strategy, TARGET_CHUNK_VERSION, doc_id)
                         )
                     if verbose:
                         print(f"  Fixed strategy from '{original_chunk_strategy}' to '{expected_strategy}'")
@@ -622,10 +657,10 @@ def migrate_document(
             cur.execute(
                 """
                 UPDATE documents 
-                SET chunk_strategy = ?, chunk_version = 1, raw_content = COALESCE(raw_content, ?)
+                SET chunk_strategy = ?, chunk_version = ?, raw_content = COALESCE(raw_content, ?)
                 WHERE id = ?
                 """,
-                (chunk_strategy, raw_to_store, doc_id)
+                (chunk_strategy, TARGET_CHUNK_VERSION, raw_to_store, doc_id)
             )
         
         stats['success'] = True
@@ -643,16 +678,21 @@ def migrate_document(
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Migrate documents to v0.8 chunking format')
+    parser = argparse.ArgumentParser(description='Migrate documents to the latest chunking format')
     parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
     parser.add_argument('--dry-run', '-n', action='store_true', help='Dry run (no changes)')
     parser.add_argument('--doc-type', type=str, help='Only migrate documents of this type')
     parser.add_argument('--doc-id', type=int, help='Only migrate this specific document ID')
     parser.add_argument('--force', action='store_true', help='Force migration even if chunk_strategy/version look up-to-date')
+    parser.add_argument(
+        '--reindex-all',
+        action='store_true',
+        help='Rebuild chunks for all selected docs using raw_content and the latest chunkers',
+    )
     args = parser.parse_args()
     
     print("=" * 60)
-    print("Document Migration: v0.7 → v0.8")
+    print("Document Migration: v0.7+ → latest chunking")
     print("=" * 60)
     
     if args.dry_run:
@@ -684,11 +724,17 @@ def main():
         elif args.doc_type:
             cur.execute(f"{base_query} WHERE doc_type = ? ORDER BY id", (args.doc_type,))
             docs = cur.fetchall()
-            documents = docs if args.force else [row for row in docs if should_migrate_doc(row)]
+            if args.reindex_all or args.force:
+                documents = docs
+            else:
+                documents = [row for row in docs if should_migrate_doc(row)]
         else:
             cur.execute(f"{base_query} ORDER BY id")
             docs = cur.fetchall()
-            documents = docs if args.force else [row for row in docs if should_migrate_doc(row)]
+            if args.reindex_all or args.force:
+                documents = docs
+            else:
+                documents = [row for row in docs if should_migrate_doc(row)]
     
     if not documents:
         print("\n✓ No documents need migration")
@@ -706,7 +752,14 @@ def main():
         if args.verbose:
             print(f"\n[{doc_id}] {title[:50]} ({doc_type})")
         
-        stats = migrate_document(store, doc_id, doc_type, args.verbose, args.dry_run)
+        stats = migrate_document(
+            store,
+            doc_id,
+            doc_type,
+            args.verbose,
+            args.dry_run,
+            args.reindex_all,
+        )
         results.append(stats)
     
     # Print summary
