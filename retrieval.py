@@ -229,7 +229,8 @@ class TypeBooster:
         'web_page': 1.1,
         'chat': 1.0,
         'paper': 1.15,
-        'rss_daily_summary': 0.9
+        'rss_daily_summary': 0.9,
+        'lifelong_summary': 1.05,
     }
     
     def __init__(self, boosts: Optional[Dict[str, float]] = None):

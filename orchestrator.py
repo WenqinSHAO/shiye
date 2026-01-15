@@ -1,10 +1,14 @@
 # --- LLM Orchestrator --------------------------------
 import os
+import json
 from typing import Optional, List, Union
 import textwrap
 from datetime import UTC, datetime
 from workspace import MemoryWorkspace
 from datatypes import Message, Role, ensure_utc
+from lifelong_summary import ensure_reference_ids, render_markdown_from_payload
+from prompts import lifelong_summary_instruction, rss_summary_instruction
+from config import SHIYE_SUMMARY_CADENCE_DAYS, SHIYE_SUMMARY_MAX_MESSAGES
 import dspy
 
 llm_base = "https://api.deepseek.com"
@@ -46,6 +50,14 @@ class Reply(dspy.Signature):
         desc="list of messages in the reply split by time references if needed")
 
 
+class LifelongSummarySignature(dspy.Signature):
+    """Summarize recent activity into a lifelong summary JSON payload."""
+    instruction: str = dspy.InputField()
+    recent_messages: str = dspy.InputField(desc="Recent messages to summarize")
+    previous_summary: str = dspy.InputField(desc="Previous summary text or empty")
+    payload_json: str = dspy.OutputField(desc="JSON payload with facets/topics/references")
+
+
 class Orchestrator:
     """Orchestrates replies and summaries using DSPy if configured, else falls back to local methods."""
       
@@ -53,6 +65,7 @@ class Orchestrator:
         self.workspace = workspace
         self.dspy_predictor = dspy.Predict(Reply) if llm_key else None
         self.dspy_chunker = dspy.Predict(TimeChunker) if llm_key else None
+        self.dspy_summarizer = dspy.Predict(LifelongSummarySignature) if llm_key else None
         self.last_llm_trace: Optional[dict] = None
         self.last_search_context = None  # Cache last search context for reuse
         self.last_search_time = None  # Track when we last searched
@@ -218,6 +231,110 @@ class Orchestrator:
                 return self._fallback_reply(user_text=user_text, note=f"(DSPy error: {e})")
         return self._fallback_reply(user_text=user_text, note="(no DSPy configured)")
 
+    def summarize_lifelong(
+        self,
+        *,
+        manual: bool = False,
+        facet: Optional[str] = None,
+        topic: Optional[str] = None,
+    ) -> Message:
+        if facet in {"profile", "timeline"}:
+            topic = None
+        latest = self.workspace.get_latest_lifelong_summary(facet=facet, topic=topic)
+        latest_dt = None
+        if latest:
+            try:
+                latest_dt = ensure_utc(datetime.fromisoformat(latest.get("event_at") or latest.get("created_at")))
+            except Exception:
+                latest_dt = None
+
+        if latest_dt and not manual:
+            age_days = (datetime.now(UTC) - latest_dt).days
+            if age_days < SHIYE_SUMMARY_CADENCE_DAYS:
+                return Message(
+                    content=f"[summary] Last summary is {age_days}d old; next cadence not reached.",
+                    role=Role.SYSTEM,
+                )
+
+        since_dt = latest_dt or datetime.fromtimestamp(0, tz=UTC)
+        recent_messages = self.workspace.list_messages_since(since_dt, limit=SHIYE_SUMMARY_MAX_MESSAGES)
+        if not recent_messages:
+            return Message(
+                content="[summary] No new material since the last summary.",
+                role=Role.SYSTEM,
+            )
+
+        references = [m.metadata.get("chunk_id") for m in recent_messages if m.metadata.get("chunk_id")]
+        payload = {
+            "facet": facet,
+            "topic": topic,
+            "trigger": "manual" if manual else "scheduled",
+            "facets": {"profile": [], "topics": [], "timeline": []},
+            **ensure_reference_ids(references),
+        }
+
+        recent_text = "\n".join(m.to_text() for m in recent_messages if m.content)
+        previous_summary_text = ""
+        if latest and latest.get("id"):
+            try:
+                doc = self.workspace.get_document(latest["id"])
+                previous_summary_text = doc.get("content") or ""
+            except Exception:
+                previous_summary_text = ""
+
+        payload_delta = {}
+        if self.dspy_summarizer:
+            try:
+                instruction = lifelong_summary_instruction(
+                    facet=facet,
+                    is_delta=bool(previous_summary_text),
+                )
+                out = self.dspy_summarizer(
+                    instruction=instruction,
+                    recent_messages=recent_text,
+                    previous_summary=previous_summary_text,
+                )
+                try:
+                    payload_delta = json.loads(out.payload_json or "{}")
+                except Exception:
+                    payload_delta = {}
+            except Exception as e:
+                payload_delta = {"notes": f"LLM summary failed: {e}"}
+
+        if payload_delta:
+            payload = {**payload, **payload_delta}
+        if not payload.get("facets"):
+            payload["facets"] = {"profile": [], "topics": [], "timeline": []}
+        if not payload_delta:
+            payload["facets"]["timeline"].append(
+                {
+                    "date": datetime.now(UTC).date().isoformat(),
+                    "event": f"New messages: {len(recent_messages)}",
+                }
+            )
+
+        markdown = render_markdown_from_payload(payload)
+        if not markdown:
+            markdown = f"- New messages: {len(recent_messages)}"
+
+        result = self.workspace.save_lifelong_summary(
+            payload=payload,
+            markdown=markdown,
+            summary_date=datetime.now(UTC),
+            summary_source="system",
+            facet=facet,
+            topic=topic,
+        )
+        if result and result.get("document_id"):
+            return Message(
+                content=f"[summary] Saved summary document #{result['document_id']}.",
+                role=Role.SYSTEM,
+            )
+        return Message(
+            content="[summary] Generated summary (storage unavailable).",
+            role=Role.SYSTEM,
+        )
+
 
     def timelinereply(self, user_text: str) -> List[Message]:
    
@@ -280,11 +397,7 @@ class Orchestrator:
         joined = "\n\n".join(content_lines)
         if self.dspy_predictor:
             try:
-                instruction = (
-                    "Create a concise daily brief of the following RSS items. "
-                    "Highlight what might interest the user. Include inline references with the title and URL. "
-                    f"Keywords to bias toward: {', '.join(keywords)}."
-                )
+                instruction = rss_summary_instruction(keywords=keywords)
                 self.last_llm_trace = {
                     "type": "rss_summary",
                     "ts": datetime.now(UTC).isoformat(),
