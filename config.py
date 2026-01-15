@@ -15,3 +15,7 @@ SHIYE_SEARCH_TOP_K = int(os.getenv("SHIYE_SEARCH_TOP_K", "5"))
 SHIYE_RRF_K = int(os.getenv("SHIYE_RRF_K", "60"))  # RRF constant
 SHIYE_RECENCY_DECAY_DAYS = int(os.getenv("SHIYE_RECENCY_DECAY_DAYS", "30"))
 SHIYE_DEBUG_RETRIEVAL = os.getenv("SHIYE_DEBUG_RETRIEVAL", "false").lower() == "true"
+
+# Lifelong summarization settings
+SHIYE_SUMMARY_CADENCE_DAYS = int(os.getenv("SHIYE_SUMMARY_CADENCE_DAYS", "7"))
+SHIYE_SUMMARY_MAX_MESSAGES = int(os.getenv("SHIYE_SUMMARY_MAX_MESSAGES", "200"))

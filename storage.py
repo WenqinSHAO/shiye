@@ -1659,6 +1659,78 @@ class LocalStore:
             )
         return notes
 
+    def list_lifelong_summaries(
+        self,
+        limit: int = 20,
+        facet: Optional[str] = None,
+        topic: Optional[str] = None,
+    ) -> List[dict]:
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT * FROM documents
+                WHERE doc_type = 'lifelong_summary'
+                ORDER BY datetime(COALESCE(event_at, created_at)) DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+        summaries: List[dict] = []
+        for row in rows:
+            tags = json.loads(row["tags"]) if row["tags"] else {}
+            if facet and tags.get("facet") != facet:
+                continue
+            if topic and tags.get("topic") != topic:
+                continue
+            summaries.append(
+                {
+                    "id": row["id"],
+                    "title": row["title"] or "Summary",
+                    "created_at": ensure_utc(datetime.fromisoformat(row["created_at"])).isoformat()
+                    if row["created_at"]
+                    else None,
+                    "event_at": ensure_utc(datetime.fromisoformat(row["event_at"])).isoformat()
+                    if row["event_at"]
+                    else None,
+                    "tags": tags,
+                }
+            )
+        return summaries
+
+    def get_latest_lifelong_summary(
+        self,
+        facet: Optional[str] = None,
+        topic: Optional[str] = None,
+    ) -> Optional[dict]:
+        summaries = self.list_lifelong_summaries(limit=50, facet=facet, topic=topic)
+        return summaries[0] if summaries else None
+
+    def list_messages_since(
+        self,
+        since: datetime,
+        limit: int = 200,
+    ) -> List[Message]:
+        since_iso = ensure_utc(since).isoformat()
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT c.*, d.doc_type, d.raw_content AS doc_raw_content, d.chunk_strategy AS doc_chunk_strategy
+                FROM chunks c
+                JOIN documents d ON c.document_id = d.id
+                WHERE d.doc_type = 'chat'
+                  AND c.deleted = 0
+                  AND datetime(c.created_at) >= datetime(?)
+                ORDER BY datetime(c.created_at) ASC
+                LIMIT ?
+                """,
+                (since_iso, limit),
+            )
+            rows = cur.fetchall()
+        return [self._row_to_message(row) for row in rows]
+
     def get_note(self, note_id: int) -> Optional[dict]:
         with self._connect() as conn:
             cur = conn.cursor()

@@ -273,7 +273,8 @@ def index() -> HTMLResponse:
                                 <span class="command-pill">/find</span>
                                 <span class="command-pill">/add</span>
                                 <span class="command-pill">/rss</span>
-                                <span class="command-pill">/summarize</span>
+                                <span class="command-pill">/list</span>
+                                <span class="command-pill">/sum</span>
                                 <span class="command-pill">/clear</span>
                             </div>
                             <div style="flex:1;"></div>
@@ -385,6 +386,7 @@ def index() -> HTMLResponse:
                 switch (t) {
                     case "web_page": return "url";
                     case "rss_daily_summary": return "rss_summary";
+                    case "lifelong_summary": return "lifelong_summary";
                     case "chat": return "chat";
                     case "note": return "note";
                     case "paper": return "paper";
@@ -2027,9 +2029,45 @@ def chat(payload=Body(...)) -> dict:
     if not text:
         return {"messages": []}
     try:
+        def parse_summary_args(raw: str) -> dict:
+            facet = None
+            topic = None
+            for part in raw.split():
+                if ":" not in part:
+                    continue
+                key, value = part.split(":", 1)
+                if key == "facet":
+                    facet = value
+                elif key == "topic":
+                    topic = value
+            return {"facet": facet, "topic": topic}
+
         if text.strip().startswith("/add"):
             logs = handle_add(text.strip().removeprefix("/add").strip(), workspace, orchestrator, debug=debug)
             return {"messages": [make_system_msg(log["text"]) | {"debug": log.get("debug")} for log in logs]}
+
+        if text.strip().startswith("/list"):
+            args = text.strip().removeprefix("/list").strip()
+            parsed = parse_summary_args(args)
+            summaries = workspace.list_lifelong_summaries(limit=10, **parsed)
+            if not summaries:
+                return {"messages": [make_system_msg("[list] No summaries found.")]}
+            lines = ["[list] Latest summaries:", ""]
+            for item in summaries:
+                timestamp = item.get("event_at") or item.get("created_at") or "unknown"
+                title = item.get("title") or "Summary"
+                tags = item.get("tags") or {}
+                facet_label = tags.get("facet") or ""
+                topic_label = tags.get("topic") or ""
+                label = " • ".join(p for p in [title, facet_label, topic_label, timestamp] if p)
+                lines.append(f"- #{item['id']} • {label}")
+            return {"messages": [make_system_msg("\n".join(lines))]}
+
+        if text.strip().startswith("/sum"):
+            args = text.strip().removeprefix("/sum").strip()
+            parsed = parse_summary_args(args)
+            summary_msg = orchestrator.summarize_lifelong(manual=True, **parsed)
+            return {"messages": [make_system_msg(summary_msg.content)]}
         
         # Handle /find command for semantic search
         if text.strip().startswith("/find"):

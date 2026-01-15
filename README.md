@@ -87,12 +87,25 @@ Environment variables:
 - **RSS Feed Aggregation**: Daily summaries from configured feeds
 - **Time-Aware Context**: Automatic timestamp handling and temporal reasoning
 
+### Lifelong Summaries (v0.9 draft)
+
+Summaries are stored as first-class documents with a JSON payload (source of truth) plus
+rendered Markdown for display. The JSON payload tracks three facets:
+
+- **Profile**: user interests and long/short-term objectives.
+- **Topics**: thematic/project groupings, extensible at runtime.
+- **Timeline**: second-order summary derived from profile/topic evolution.
+
+Facets can be scoped with optional `facet:<name>` (e.g., `profile`, `topics`, `timeline`)
+and `topic:<name>` metadata so summaries for a specific topic can be listed or searched
+without parsing the full document.
+
 ### Enhanced Retrieval & Chunking (v0.8)
 
 Shiye v0.8 ships hybrid retrieval (dense + sparse + RRF + optional rerank) and token-aware chunking with strategy/version tracking. For the full design notes and configuration details, see [Retrieval.md](Retrieval.md) and [CHUNKING_GUIDE.md](CHUNKING_GUIDE.md).
 
 **Search Filters**:
-- `type:<doc_type>` - Filter by document type (note, web_page, chat, paper, rss_daily_summary)
+- `type:<doc_type>` - Filter by document type (note, web_page, chat, paper, rss_daily_summary, lifelong_summary)
 - `tag:<tag>` - Filter by tag (future implementation)
 - `before:<date>` - Items before date (YYYY-MM-DD format)
 - `after:<date>` - Items after date (YYYY-MM-DD format)
@@ -110,8 +123,9 @@ Shiye v0.8 ships hybrid retrieval (dense + sparse + RRF + optional rerank) and t
 - `/add <text>` - Add notes or fetch URL content
   - `/add fetch <url>` - Fetch and store web page content
   - `/add refs <urls>` - Store URL references without fetching
+- `/list` - List recent lifelong summaries (optional `facet:<name>`/`topic:<name>`)
+- `/sum` - Manually trigger a lifelong summary (optional `facet:<name>`/`topic:<name>`)
 - `/rss` - Generate daily RSS digest from configured feeds
-- `/summarize` - Summarize current conversation context
 - `/clear` - Clear on-screen chat log (doesn't affect storage)
 
 ### Debugging Retrieval

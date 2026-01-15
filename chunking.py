@@ -590,7 +590,7 @@ def get_chunker_for_doctype(doc_type: str, **kwargs) -> Chunker:
     """Factory function to get appropriate chunker for document type.
     
     Args:
-        doc_type: Document type (note, web_page, paper, chat, rss_daily_summary)
+        doc_type: Document type (note, web_page, paper, chat, rss_daily_summary, lifelong_summary)
         **kwargs: Additional arguments passed to chunker constructor
         
     Returns:
@@ -606,8 +606,10 @@ def get_chunker_for_doctype(doc_type: str, **kwargs) -> Chunker:
         # Return MessageChunker for chat conversations
         return MessageChunker(**kwargs)
     elif doc_type == 'rss_daily_summary':
-        # RSS summaries are typically single chunks
-        return FixedTokenChunker(chunk_size=2000, overlap_tokens=0, **kwargs)
+        # RSS summaries are typically single chunks (keep token limits friendly)
+        return FixedTokenChunker(chunk_size=256, overlap_tokens=0, **kwargs)
+    elif doc_type == 'lifelong_summary':
+        return FixedTokenChunker(chunk_size=256, overlap_tokens=0, **kwargs)
     else:
         # Default to fixed token chunker
         return FixedTokenChunker(**kwargs)

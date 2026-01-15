@@ -4,6 +4,7 @@ from typing import List, Optional
 import json
 
 from datatypes import Message, Role, ensure_utc
+from lifelong_summary import LifelongSummary, build_lifelong_summary
 from embeddings import EmbeddingProvider
 from storage import LocalStore, NoteConflictError, StoredChunk
 from retrieval import SearchRequest, SearchHit
@@ -59,6 +60,60 @@ class MemoryWorkspace:
         # fallback: just add to memory
         for m in messages:
             self.add(m)
+
+    def save_lifelong_summary(
+        self,
+        payload: dict,
+        markdown: str,
+        summary_date: Optional[datetime] = None,
+        title: Optional[str] = None,
+        summary_source: str = "system",
+        facet: Optional[str] = None,
+        topic: Optional[str] = None,
+        tags: Optional[dict] = None,
+    ) -> Optional[dict]:
+        summary: LifelongSummary = build_lifelong_summary(
+            payload=payload,
+            markdown=markdown,
+            summary_date=summary_date,
+            title=title,
+            summary_source=summary_source,
+            facet=facet,
+            topic=topic,
+            tags=tags,
+        )
+        content = summary.render_document()
+        document_meta = summary.document_meta()
+        if self.store:
+            result = self.store.add_document_chunked(content=content, document_meta=document_meta)
+            result["title"] = document_meta.get("title")
+            return result
+        self.add(Message(content=content, role=Role.SYSTEM))
+        return None
+
+    def list_lifelong_summaries(
+        self,
+        limit: int = 20,
+        facet: Optional[str] = None,
+        topic: Optional[str] = None,
+    ) -> List[dict]:
+        if self.store:
+            return self.store.list_lifelong_summaries(limit=limit, facet=facet, topic=topic)
+        return []
+
+    def get_latest_lifelong_summary(
+        self,
+        facet: Optional[str] = None,
+        topic: Optional[str] = None,
+    ) -> Optional[dict]:
+        if self.store:
+            return self.store.get_latest_lifelong_summary(facet=facet, topic=topic)
+        return None
+
+    def list_messages_since(self, since: datetime, limit: int = 200) -> List[Message]:
+        if self.store:
+            return self.store.list_messages_since(since=since, limit=limit)
+        return [m for m in self._fallback_items if ensure_utc(m.created_at) >= ensure_utc(since)][:limit]
 
     def list_recent(self, n: int = 20) -> List[Message]:
         if self.store:
