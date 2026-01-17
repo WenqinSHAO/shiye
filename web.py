@@ -2032,6 +2032,9 @@ def chat(payload=Body(...)) -> dict:
         def parse_summary_args(raw: str) -> dict:
             facet = None
             topic = None
+            facets = None
+            since = None
+            batch_days = None
             for part in raw.split():
                 if ":" not in part:
                     continue
@@ -2040,7 +2043,22 @@ def chat(payload=Body(...)) -> dict:
                     facet = value
                 elif key == "topic":
                     topic = value
-            return {"facet": facet, "topic": topic}
+                elif key == "facets":
+                    facets = [item.strip() for item in value.split(",") if item.strip()]
+                elif key == "since":
+                    since = value
+                elif key == "batch_days":
+                    try:
+                        batch_days = int(value)
+                    except ValueError:
+                        batch_days = None
+            return {
+                "facet": facet,
+                "topic": topic,
+                "facets": facets,
+                "since": since,
+                "batch_days": batch_days,
+            }
 
         if text.strip().startswith("/add"):
             logs = handle_add(text.strip().removeprefix("/add").strip(), workspace, orchestrator, debug=debug)
@@ -2065,6 +2083,24 @@ def chat(payload=Body(...)) -> dict:
 
         if text.strip().startswith("/sum"):
             args = text.strip().removeprefix("/sum").strip()
+            if args.startswith("bootstrap"):
+                raw = args.removeprefix("bootstrap").strip()
+                parsed = parse_summary_args(raw)
+                since_raw = parsed.get("since")
+                if not since_raw:
+                    return {"messages": [make_system_msg("[bootstrap] Missing since:YYYY-MM-DD argument.")]}
+                try:
+                    since_dt = datetime.fromisoformat(since_raw)
+                    if since_dt.tzinfo is None:
+                        since_dt = since_dt.replace(tzinfo=UTC)
+                except ValueError:
+                    return {"messages": [make_system_msg("[bootstrap] Invalid since date format. Use YYYY-MM-DD.")]}
+                summary_msg = orchestrator.bootstrap_lifelong(
+                    since=since_dt,
+                    batch_days=parsed.get("batch_days") or 30,
+                    facets=parsed.get("facets"),
+                )
+                return {"messages": [make_system_msg(summary_msg.content)]}
             parsed = parse_summary_args(args)
             summary_msg = orchestrator.summarize_lifelong(manual=True, **parsed)
             return {"messages": [make_system_msg(summary_msg.content)]}

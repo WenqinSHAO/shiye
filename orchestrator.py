@@ -3,11 +3,12 @@ import os
 import json
 from typing import Optional, List, Union
 import textwrap
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from workspace import MemoryWorkspace
 from datatypes import Message, Role, ensure_utc
-from lifelong_summary import ensure_reference_ids, render_markdown_from_payload
-from prompts import lifelong_summary_instruction, rss_summary_instruction
+from lifelong_summary import ensure_reference_ids, merge_references, render_markdown_from_payload
+from prompts import LIFELONG_SUMMARY_PROMPT_VERSION, lifelong_summary_instruction, rss_summary_instruction
+from summary_planner import SummaryPlanner
 from config import SHIYE_SUMMARY_CADENCE_DAYS, SHIYE_SUMMARY_MAX_MESSAGES
 import dspy
 
@@ -69,6 +70,13 @@ class Orchestrator:
         self.last_llm_trace: Optional[dict] = None
         self.last_search_context = None  # Cache last search context for reuse
         self.last_search_time = None  # Track when we last searched
+        self.bootstrap_doc_types = [
+            "chat",
+            "note",
+            "rss_daily_summary",
+            "web_page",
+            "paper",
+        ]
 
 
     def should_search(self, user_text: List[Message], history_count: int = 0) -> str:
@@ -240,6 +248,12 @@ class Orchestrator:
     ) -> Message:
         if facet in {"profile", "timeline"}:
             topic = None
+        if manual and not facet and not topic:
+            latest_summary = self.workspace.get_latest_lifelong_summary()
+            if not latest_summary:
+                bootstrap_since = self._get_bootstrap_start_date()
+                if bootstrap_since:
+                    return self.bootstrap_lifelong(since=bootstrap_since)
         latest = self.workspace.get_latest_lifelong_summary(facet=facet, topic=topic)
         latest_dt = None
         if latest:
@@ -269,6 +283,7 @@ class Orchestrator:
             "facet": facet,
             "topic": topic,
             "trigger": "manual" if manual else "scheduled",
+            "prompt_version": LIFELONG_SUMMARY_PROMPT_VERSION,
             "facets": {"profile": [], "topics": [], "timeline": []},
             **ensure_reference_ids(references),
         }
@@ -303,6 +318,14 @@ class Orchestrator:
 
         if payload_delta:
             payload = {**payload, **payload_delta}
+            payload["facet"] = facet
+            payload["topic"] = topic
+            payload["trigger"] = "manual" if manual else "scheduled"
+            payload["prompt_version"] = LIFELONG_SUMMARY_PROMPT_VERSION
+            payload["references"] = merge_references(
+                payload.get("references"),
+                payload_delta.get("references"),
+            )
         if not payload.get("facets"):
             payload["facets"] = {"profile": [], "topics": [], "timeline": []}
         if not payload_delta:
@@ -333,6 +356,198 @@ class Orchestrator:
         return Message(
             content="[summary] Generated summary (storage unavailable).",
             role=Role.SYSTEM,
+        )
+
+    def bootstrap_lifelong(
+        self,
+        *,
+        since: datetime,
+        batch_days: int = 30,
+        facets: Optional[List[str]] = None,
+    ) -> Message:
+        planner = SummaryPlanner(batch_days=batch_days)
+        requested_facets = facets or ["profile", "topics", "timeline"]
+        requests = planner.plan_bootstrap(requested_facets, since=since)
+        saved = 0
+        skipped = 0
+        batch_cache: dict[tuple[datetime, datetime], tuple[str, str, list[dict], int]] = {}
+
+        for request in requests:
+            batch_start = request.since or since
+            batch_end = batch_start + timedelta(days=batch_days)
+            cache_key = (batch_start, batch_end)
+            if cache_key in batch_cache:
+                prefix, recent_text, references, doc_count = batch_cache[cache_key]
+            else:
+                documents = self.workspace.list_documents(
+                    doc_types=self.bootstrap_doc_types,
+                    since=batch_start,
+                    until=batch_end,
+                    limit=1000,
+                )
+                recent_text, references = self._format_bootstrap_documents(documents)
+                doc_count = len(documents)
+                prefix = self._bootstrap_prefix(batch_start, batch_end, doc_count)
+                batch_cache[cache_key] = (prefix, recent_text, references, doc_count)
+            if not recent_text:
+                skipped += 1
+                continue
+
+            payload = {
+                "facet": request.facet,
+                "topic": None,
+                "trigger": "bootstrap",
+                "prompt_version": LIFELONG_SUMMARY_PROMPT_VERSION,
+                "facets": {"profile": [], "topics": [], "timeline": []},
+                "references": references,
+                "bootstrap": {
+                    "since": batch_start.date().isoformat(),
+                    "until": batch_end.date().isoformat(),
+                    "batch_label": request.batch_label,
+                    "doc_count": doc_count,
+                },
+            }
+
+            payload_delta = {}
+            if self.dspy_summarizer:
+                try:
+                    instruction = lifelong_summary_instruction(
+                        facet=request.facet,
+                        is_delta=False,
+                    )
+                    out = self.dspy_summarizer(
+                        instruction=instruction,
+                        recent_messages=f"{prefix}\n\n{recent_text}".strip(),
+                        previous_summary="",
+                    )
+                    payload_delta = json.loads(out.payload_json or "{}")
+                except Exception as e:
+                    payload_delta = {"notes": f"LLM bootstrap summary failed: {e}"}
+
+            if payload_delta:
+                payload = {**payload, **payload_delta}
+                payload["facet"] = request.facet
+                payload["trigger"] = "bootstrap"
+                payload["prompt_version"] = LIFELONG_SUMMARY_PROMPT_VERSION
+                payload["references"] = merge_references(
+                    payload.get("references"),
+                    payload_delta.get("references"),
+                )
+
+            if not payload.get("facets"):
+                payload["facets"] = {"profile": [], "topics": [], "timeline": []}
+            if not payload_delta:
+                payload["facets"]["timeline"].append(
+                    {
+                        "date": batch_start.date().isoformat(),
+                        "event": f"Bootstrap batch documents: {doc_count}",
+                    }
+                )
+
+            markdown = render_markdown_from_payload(payload)
+            if not markdown:
+                markdown = (
+                    f"- Bootstrap batch {batch_start.date().isoformat()} to "
+                    f"{batch_end.date().isoformat()} ({doc_count} docs)"
+                )
+
+            result = self.workspace.save_lifelong_summary(
+                payload=payload,
+                markdown=markdown,
+                summary_date=datetime.now(UTC),
+                summary_source="system",
+                facet=request.facet,
+                topic=None,
+                tags={
+                    "facet": request.facet,
+                    "bootstrap_batch": request.batch_label,
+                    "bootstrap_since": batch_start.date().isoformat(),
+                    "bootstrap_until": batch_end.date().isoformat(),
+                },
+            )
+            if result and result.get("document_id"):
+                saved += 1
+            else:
+                skipped += 1
+
+        return Message(
+            content=(
+                "[bootstrap] Completed lifelong summary bootstrap. "
+                f"Saved: {saved}, Skipped: {skipped}."
+            ),
+            role=Role.SYSTEM,
+        )
+
+    def _format_bootstrap_documents(self, documents: List[dict]) -> tuple[str, list[dict]]:
+        blocks: list[str] = []
+        references: list[dict] = []
+        for doc in documents:
+            doc_text = self._extract_document_text(doc)
+            if not doc_text:
+                continue
+            doc_type = doc.get("doc_type") or "unknown"
+            title = doc.get("title") or doc.get("uri") or f"Document {doc.get('id')}"
+            header = f"[{doc_type}] {title}"
+            blocks.append(f"{header}\n{doc_text}".strip())
+            if doc.get("id") is not None:
+                references.append({"document_id": doc["id"]})
+        return "\n\n".join(blocks), references
+
+    def _extract_document_text(self, doc: dict) -> str:
+        raw = doc.get("raw_content")
+        if raw is None:
+            return ""
+        doc_type = (doc.get("doc_type") or "").lower()
+        if doc_type == "chat":
+            try:
+                data = json.loads(raw)
+            except Exception:
+                data = raw
+            if isinstance(data, list):
+                lines = []
+                for item in data:
+                    if isinstance(item, dict):
+                        role = item.get("role") or "user"
+                        content = item.get("content") or ""
+                        if content:
+                            lines.append(f"{role}: {content}")
+                    else:
+                        text = str(item)
+                        if text:
+                            lines.append(text)
+                return "\n".join(lines).strip()
+            if isinstance(data, dict):
+                content = data.get("content") if isinstance(data, dict) else None
+                return (content or str(data)).strip()
+        if isinstance(raw, str):
+            return raw.strip()
+        try:
+            return json.dumps(raw, ensure_ascii=False).strip()
+        except Exception:
+            return str(raw).strip()
+
+    def _get_bootstrap_start_date(self) -> Optional[datetime]:
+        documents = self.workspace.list_documents(
+            doc_types=self.bootstrap_doc_types,
+            limit=1,
+        )
+        if not documents:
+            return None
+        doc = documents[0]
+        timestamp = doc.get("event_at") or doc.get("created_at") or doc.get("ingested_at")
+        if not timestamp:
+            return None
+        try:
+            dt = datetime.fromisoformat(timestamp)
+        except ValueError:
+            return None
+        return ensure_utc(dt)
+
+    def _bootstrap_prefix(self, batch_start: datetime, batch_end: datetime, doc_count: int) -> str:
+        return (
+            "Bootstrap batch context.\n"
+            f"Window: {batch_start.date().isoformat()} to {batch_end.date().isoformat()}.\n"
+            f"Document count: {doc_count}."
         )
 
 

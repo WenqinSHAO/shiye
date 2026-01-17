@@ -120,6 +120,18 @@ class MemoryWorkspace:
             return self.store.list_recent(n)
         return self._fallback_items[-n:]
 
+    def list_documents(
+        self,
+        *,
+        doc_types: Optional[List[str]] = None,
+        since: Optional[datetime] = None,
+        until: Optional[datetime] = None,
+        limit: int = 500,
+    ) -> List[dict]:
+        if self.store:
+            return self.store.list_documents(doc_types=doc_types, since=since, until=until, limit=limit)
+        return []
+
     def list_messages_by_day(self, day: str, limit: int = 500) -> List[Message]:
         """Return messages for a given calendar day (YYYY-MM-DD), ordered by creation."""
         if self.store:

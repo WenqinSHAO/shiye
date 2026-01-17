@@ -24,7 +24,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
 
@@ -1658,6 +1658,60 @@ class LocalStore:
                 }
             )
         return notes
+
+    def list_documents(
+        self,
+        *,
+        doc_types: Optional[Iterable[str]] = None,
+        since: Optional[datetime] = None,
+        until: Optional[datetime] = None,
+        limit: int = 500,
+    ) -> List[dict]:
+        """List raw documents across types (similar windowing to list_message_days)."""
+        clauses = ["(status IS NULL OR status != 'deleted')"]
+        params: list[Any] = []
+        doc_types_list = list(doc_types) if doc_types else []
+        if doc_types_list:
+            placeholders = ", ".join(["?"] * len(doc_types_list))
+            clauses.append(f"doc_type IN ({placeholders})")
+            params.extend(doc_types_list)
+        if since:
+            clauses.append("datetime(COALESCE(event_at, created_at)) >= datetime(?)")
+            params.append(ensure_utc(since).isoformat())
+        if until:
+            clauses.append("datetime(COALESCE(event_at, created_at)) < datetime(?)")
+            params.append(ensure_utc(until).isoformat())
+        where_clause = " AND ".join(clauses) if clauses else "1=1"
+        sql = f"""
+            SELECT id, doc_type, title, source, uri, raw_content, tags,
+                   created_at, event_at, ingested_at
+            FROM documents
+            WHERE {where_clause}
+            ORDER BY datetime(COALESCE(event_at, created_at)) ASC
+            LIMIT ?
+        """
+        params.append(limit)
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(sql, tuple(params))
+            rows = cur.fetchall()
+        documents: List[dict] = []
+        for row in rows:
+            documents.append(
+                {
+                    "id": row["id"],
+                    "doc_type": row["doc_type"],
+                    "title": row["title"],
+                    "source": row["source"],
+                    "uri": row["uri"],
+                    "raw_content": row["raw_content"] if "raw_content" in row.keys() else None,
+                    "tags": json.loads(row["tags"]) if row["tags"] else {},
+                    "created_at": row["created_at"],
+                    "event_at": row["event_at"],
+                    "ingested_at": row["ingested_at"] if "ingested_at" in row.keys() else None,
+                }
+            )
+        return documents
 
     def list_lifelong_summaries(
         self,

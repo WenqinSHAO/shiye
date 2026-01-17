@@ -124,7 +124,8 @@ Shiye v0.8 ships hybrid retrieval (dense + sparse + RRF + optional rerank) and t
   - `/add fetch <url>` - Fetch and store web page content
   - `/add refs <urls>` - Store URL references without fetching
 - `/list` - List recent lifelong summaries (optional `facet:<name>`/`topic:<name>`)
-- `/sum` - Manually trigger a lifelong summary (optional `facet:<name>`/`topic:<name>`)
+- `/sum` - Manually trigger a lifelong summary (optional `facet:<name>`/`topic:<name>`, auto-bootstraps if no summaries exist)
+- `/sum bootstrap since:<YYYY-MM-DD> [batch_days:<N>] [facets:<profile,topics,timeline>]` - Run a bootstrap pass over raw documents
 - `/rss` - Generate daily RSS digest from configured feeds
 - `/clear` - Clear on-screen chat log (doesn't affect storage)
 

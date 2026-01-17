@@ -104,6 +104,25 @@ def ensure_reference_ids(reference_ids: Optional[Iterable[str]] = None) -> Dict[
     return {"references": references}
 
 
+def merge_references(
+    base: Optional[Iterable[Dict[str, Any]]],
+    extra: Optional[Iterable[Dict[str, Any]]],
+) -> list[Dict[str, Any]]:
+    """Merge reference payloads, de-duplicating by content."""
+    merged: list[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for collection in (base or [], extra or []):
+        for ref in collection:
+            if not isinstance(ref, dict):
+                continue
+            key = json.dumps(ref, ensure_ascii=False, sort_keys=True)
+            if key in seen:
+                continue
+            merged.append(ref)
+            seen.add(key)
+    return merged
+
+
 def render_markdown_from_payload(payload: Dict[str, Any]) -> str:
     """Render user-facing markdown from a summary payload."""
     facets = payload.get("facets") or {}
