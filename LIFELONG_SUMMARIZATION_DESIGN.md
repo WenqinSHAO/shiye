@@ -18,6 +18,8 @@
 - **Default language**: Chinese, with concise phrasing and character-efficient formatting.
 - Include **references** in the JSON payload to support search, using chunk IDs as the
   preferred reference unit.
+- Record a **prompt_version** in the JSON payload to trace which summarization prompt
+  generated the summary.
 
 ## Summary cadence and triggers
 - **Weekly fixed schedule** as the default cadence.
@@ -68,11 +70,14 @@
 - **Bootstrap considerations**:
   - Initial run should surface overall profile and seed topic list from recent exchanges.
   - Topic creation/merging heuristics remain a follow-on design task (not yet implemented).
+  - Bootstrap batches reuse cached prefixes per time window to reduce repeated prompt setup across facets.
 - **Entry points**:
   - `Orchestrator.summarize_lifelong(...)` handles cadence checks, delta selection, LLM calls, and persistence.
+  - `Orchestrator.bootstrap_lifelong(...)` runs batch bootstrap passes over raw documents using `SummaryPlanner`.
   - `MemoryWorkspace.save_lifelong_summary(...)` stores summaries as documents with facet/topic tags.
   - `LocalStore.list_lifelong_summaries(...)` and `get_latest_lifelong_summary(...)` power `/list` and delta lookup.
-  - Web UI commands: `/list` to list summaries and `/sum` to trigger manual summarization.
+  - Web UI commands: `/list` to list summaries, `/sum` to trigger manual summarization, and `/sum bootstrap` for bootstrapping. If `/sum` runs before any summaries exist, it automatically falls back to bootstrap using the earliest document date.
+  - Bootstrap pulls raw document content from `chat`, `note`, `rss_daily_summary`, `web_page`, and `paper` types and records document-level references.
 
 ## Planning notes (next iterations)
 ### Bootstrap strategy for large histories
@@ -138,7 +143,7 @@
   - (Follow-up) track prompt versions and attach them to summary metadata.
 
 ### Phase 2: Bootstrap pipeline
-- Add a bootstrap command (CLI or `/sum bootstrap`) to:
+- ✅ Add a bootstrap command (`/sum bootstrap`) to:
   - Load raw documents by type (chat, note, rss, web, paper).
   - Run profile/topic/timeline passes with batching and cached prefixes.
   - Persist summaries per facet/topic with provenance metadata.

@@ -3,6 +3,9 @@ from __future__ import annotations
 from typing import Optional
 
 
+LIFELONG_SUMMARY_PROMPT_VERSION = "v0.9"
+
+
 def lifelong_summary_instruction(*, facet: Optional[str], is_delta: bool) -> str:
     """Return the prompt for lifelong summarization."""
     base = (
