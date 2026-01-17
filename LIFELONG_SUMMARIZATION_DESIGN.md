@@ -206,7 +206,7 @@ test coverage, and documentation. This section documents issues found during cod
 ### Fix Plan
 
 1. **Add test coverage** (Issue 2):
-   - Add `tests/test_lifelong_summary.py` with tests for:
+   - ✅ Added `tests/test_lifelong_summary.py` with 33 tests covering:
      - `LifelongSummary` dataclass methods
      - `SummaryPlanner.plan_bootstrap()` and `plan_delta()`
      - `prompts.lifelong_summary_instruction()` variations
@@ -214,10 +214,170 @@ test coverage, and documentation. This section documents issues found during cod
      - `orchestrator.bootstrap_lifelong()` with mocked LLM
 
 2. **Update documentation** (Issues 3, 5):
-   - Add "Current Implementation Details" section documenting:
-     - Data structures (`LifelongSummary`, `SummaryRequest`)
-     - Bootstrap workflow and batch caching strategy
-     - How prefix reuse saves tokens (shared document content across facets)
+   - ✅ Added "Current Implementation Details" section (see below)
+
+---
+
+## Current Implementation Details (v0.9.1)
+
+This section documents the actual implementation of Phase 1&2 functionality.
+
+### Data Structures
+
+#### LifelongSummary (lifelong_summary.py)
+
+```python
+@dataclass
+class LifelongSummary:
+    payload: Dict[str, Any]      # JSON payload for tools/LLM
+    markdown: str                 # Human-readable markdown
+    summary_date: datetime        # When summary was created
+    title: Optional[str]          # Optional title override
+    summary_source: str           # "system" or "user"
+    facet: Optional[str]          # "profile", "topics", or "timeline"
+    topic: Optional[str]          # Topic name when facet="topics"
+    uri: Optional[str]            # Optional URI reference
+    tags: Optional[Dict]          # Additional metadata tags
+```
+
+**Normalized Payload Structure:**
+```json
+{
+  "schema_version": "v0.9",
+  "language": "zh",
+  "summary_date": "2024-01-15",
+  "facet": "profile",
+  "topic": null,
+  "facets": {
+    "profile": ["interest 1", "interest 2"],
+    "topics": [{"name": "AI", "summary": "..."}],
+    "timeline": [{"date": "2024-01-01", "event": "..."}]
+  },
+  "references": [{"document_id": 123}],
+  "prompt_version": "v0.9",
+  "trigger": "bootstrap"
+}
+```
+
+#### SummaryRequest (summary_planner.py)
+
+```python
+@dataclass
+class SummaryRequest:
+    facet: str                    # "profile", "topics", or "timeline"
+    topic: Optional[str]          # Topic name for facet="topics"
+    is_delta: bool                # True for incremental, False for snapshot
+    batch_label: str              # Human-readable label (e.g., "profile:2024-01-01")
+    since: Optional[datetime]     # Start of time window
+```
+
+### Bootstrap Workflow
+
+The `/sum bootstrap since:YYYY-MM-DD` command triggers the following workflow:
+
+```
+1. SummaryPlanner.plan_bootstrap() → List[SummaryRequest]
+   - Creates batches for each (facet × time_window) combination
+   - Time windows are batch_days apart (default: 30 days)
+   - All bootstrap requests have is_delta=False
+
+2. For each SummaryRequest:
+   a. Check batch_cache for (batch_start, batch_end) key
+   b. If cache miss:
+      - workspace.list_documents(doc_types, since, until)
+      - _format_bootstrap_documents(docs) → (text, references)
+      - _bootstrap_prefix(start, end, count) → prefix
+      - Store in batch_cache
+   c. Build initial payload with facet/references/bootstrap metadata
+   d. If LLM available: call dspy_summarizer with prefix + text
+   e. Merge LLM response into payload
+   f. workspace.save_lifelong_summary(payload, markdown, ...)
+
+3. Return completion message with saved/skipped counts
+```
+
+### Batch Caching Strategy (Token Economy)
+
+The batch cache implements token savings for bootstrap operations:
+
+**What's Cached:**
+```python
+batch_cache: dict[
+    tuple[datetime, datetime],  # (batch_start, batch_end)
+    tuple[str, str, list[dict], int]  # (prefix, recent_text, references, doc_count)
+]
+```
+
+**How It Saves Tokens:**
+
+When bootstrapping multiple facets (profile, topics, timeline) for the same time window:
+- Document content is fetched and formatted **once** per time window
+- The same `recent_text` is reused for all facets in that window
+- Only the LLM instruction differs between facets
+
+**Example with 3 facets, 2 time windows:**
+```
+Without caching: 6 document fetches, 6 text formatting operations
+With caching:    2 document fetches, 2 text formatting operations
+                 (3x reduction in I/O and processing)
+```
+
+**LLM API Prefix Caching:**
+
+While the code-level `batch_cache` saves processing overhead, the actual LLM API
+prefix caching depends on the provider (e.g., Anthropic's prompt caching, DeepSeek's
+context caching). The implementation prepends a static header to each request:
+
+```
+Bootstrap batch context.
+Window: 2024-01-01 to 2024-01-31.
+Document count: 42.
+
+[document content follows...]
+```
+
+When the LLM provider supports prefix caching, the repeated document content
+across facet requests may be served from the provider's cache, further reducing
+token costs.
+
+### Prompt Facet Customization
+
+The `lifelong_summary_instruction(facet, is_delta)` function returns customized
+prompts for each facet:
+
+| Facet | Focus | Key Phrases |
+|-------|-------|-------------|
+| `profile` | User interests/objectives | "Focus on user interests/objectives; ignore topic details" |
+| `topics` | Thematic updates | "Focus on topic-level updates and emerging themes" |
+| `timeline` | Chronological changes | "Focus on chronological changes derived from profile/topics" |
+
+Delta mode prepends: "Summarize only deltas/new changes since previous_summary"
+Snapshot mode prepends: "Produce a full snapshot when previous_summary is empty"
+
+### Reference Handling
+
+**During Bootstrap:**
+- References use `document_id` (not `chunk_id`) since bootstrap operates on raw content
+- This is consistent with design doc guidance: "Document-level is usually enough for
+  papers/web/GitHub issues/PRs"
+
+**During Regular Summarization:**
+- References can include `chunk_id` from recent messages
+- The `merge_references()` function deduplicates references by JSON content
+
+### Test Coverage
+
+Test file: `tests/test_lifelong_summary.py` (33 tests)
+
+| Test Class | Coverage Area |
+|------------|---------------|
+| `TestLifelongSummary` | Dataclass methods, payload normalization, markdown rendering |
+| `TestSummaryPlanner` | Bootstrap planning, batch creation, delta planning |
+| `TestPrompts` | Facet-specific instructions, delta vs snapshot modes |
+| `TestOrchestratorLifelongSummary` | summarize_lifelong, bootstrap_lifelong, batch caching |
+| `TestWorkspaceLifelongSummary` | save/list/get lifelong summaries |
+
+---
 
 ### Phase 3: Topic catalog + novelty
 - Create a `topics` table (id, name, summary, last_updated, status).
