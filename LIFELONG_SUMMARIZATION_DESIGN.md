@@ -148,6 +148,77 @@
   - Run profile/topic/timeline passes with batching and cached prefixes.
   - Persist summaries per facet/topic with provenance metadata.
 
+---
+
+## Phase 1&2 Code Review Findings (v0.9.1)
+
+### Summary
+Phase 1&2 are largely implemented but have several gaps related to reference granularity,
+test coverage, and documentation. This section documents issues found during code review.
+
+### Issues Found
+
+#### Issue 1: Bootstrap references use document_id instead of chunk_id
+- **Location**: `orchestrator.py` → `_format_bootstrap_documents()`
+- **Design expectation**: "references should use chunk IDs as the preferred reference unit"
+- **Actual behavior**: Bootstrap populates `{"document_id": doc_id}` references
+- **Impact**: Low - document-level references are acceptable for bootstrap since it
+  operates on raw_content, not chunked text. Design doc also notes document-level
+  is "usually enough for papers/web/GitHub issues/PRs."
+- **Status**: ✅ Acceptable (design doc allows document-level for certain types)
+
+#### Issue 2: Missing test coverage for lifelong summary functionality
+- **Location**: `tests/` directory
+- **Design expectation**: Critical functionality should have test coverage
+- **Actual behavior**: No tests for `summarize_lifelong()`, `bootstrap_lifelong()`,
+  `SummaryPlanner`, `LifelongSummary`, or `prompts.py` summarization functions
+- **Impact**: High - regressions may go undetected
+- **Status**: 🔧 Fix required - add comprehensive tests
+
+#### Issue 3: Prefix caching documentation gap
+- **Location**: Design doc mentions "cached prefixes" but implementation details unclear
+- **Design expectation**: "Bootstrap batches reuse cached prefixes per time window to
+  reduce repeated prompt setup across facets"
+- **Actual behavior**: `batch_cache` in `bootstrap_lifelong()` caches entire document
+  content per time window, not just prefix. The prefix is a simple static header.
+- **Impact**: Medium - documentation should clarify what "prefix reuse" actually does
+- **Status**: 🔧 Update documentation to clarify actual caching strategy
+
+#### Issue 4: SummaryRequest lacks prompt_version tracking
+- **Location**: `summary_planner.py` → `SummaryRequest` dataclass
+- **Design expectation**: "(Follow-up) track prompt versions and attach them to summary metadata"
+- **Actual behavior**: `SummaryRequest` doesn't include prompt_version; it's added later
+  in `orchestrator.py` during payload construction
+- **Impact**: Low - prompt version is correctly attached to final payload
+- **Status**: ✅ Acceptable - prompt_version properly tracked in payload
+
+#### Issue 5: Documentation doesn't reflect current data structures
+- **Location**: LIFELONG_SUMMARIZATION_DESIGN.md
+- **Design expectation**: Documentation should match implementation
+- **Actual behavior**: Missing documentation of:
+  - Actual `LifelongSummary` dataclass structure
+  - `SummaryRequest` and `SummaryPlanner` API
+  - Exact workflow of `/sum bootstrap` command
+  - How batch caching works in practice
+- **Impact**: Medium - makes maintenance harder
+- **Status**: 🔧 Update documentation
+
+### Fix Plan
+
+1. **Add test coverage** (Issue 2):
+   - Add `tests/test_lifelong_summary.py` with tests for:
+     - `LifelongSummary` dataclass methods
+     - `SummaryPlanner.plan_bootstrap()` and `plan_delta()`
+     - `prompts.lifelong_summary_instruction()` variations
+     - `orchestrator.summarize_lifelong()` basic flow
+     - `orchestrator.bootstrap_lifelong()` with mocked LLM
+
+2. **Update documentation** (Issues 3, 5):
+   - Add "Current Implementation Details" section documenting:
+     - Data structures (`LifelongSummary`, `SummaryRequest`)
+     - Bootstrap workflow and batch caching strategy
+     - How prefix reuse saves tokens (shared document content across facets)
+
 ### Phase 3: Topic catalog + novelty
 - Create a `topics` table (id, name, summary, last_updated, status).
 - Add a topic assignment step that uses LLM judgment + embeddings,
