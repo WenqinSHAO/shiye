@@ -577,17 +577,22 @@ class Orchestrator:
             )
         return self._topic_catalog
 
-    def _get_novelty_detector(self):
-        """Get or create novelty detector instance."""
-        if not hasattr(self, "_novelty_detector"):
-            from topic_catalog import NoveltyDetector
+    def _get_topic_change_detector(self):
+        """Get or create topic change detector instance."""
+        if not hasattr(self, "_topic_change_detector"):
+            from topic_catalog import TopicChangeDetector
             catalog = self._get_topic_catalog()
-            self._novelty_detector = NoveltyDetector(
+            self._topic_change_detector = TopicChangeDetector(
                 catalog=catalog,
                 embedder=catalog.embedder,
                 llm_judge=self.dspy_summarizer,
             )
-        return self._novelty_detector
+        return self._topic_change_detector
+
+    # Backward compatibility alias
+    def _get_novelty_detector(self):
+        """Get or create novelty detector instance (alias for _get_topic_change_detector)."""
+        return self._get_topic_change_detector()
 
     def list_topics(self, status: Optional[str] = None) -> List[dict]:
         """List all topics in the catalog.
@@ -608,135 +613,306 @@ class Orchestrator:
         document_id: Optional[int] = None,
         use_llm: bool = True,
     ) -> Message:
-        """Assign content to a topic using novelty detection.
+        """Assign content to a topic using topic change detection.
         
-        This is the main entry point for Phase 3 topic assignment.
+        This is the main entry point for Phase 3 topic operations.
         It uses the hybrid pipeline: embedding similarity + optional LLM judge.
+        Supports all operations: create, reuse, merge, split, rename.
         
         Args:
             content: Text content to analyze
             document_id: Optional document ID for tracking
-            use_llm: Whether to use LLM for ambiguous cases
+            use_llm: Whether to use LLM for complex decisions
             
         Returns:
-            Message with assignment result
+            Message with operation result
         """
         from topic_catalog import TopicEntry, TopicAssignment
         
-        detector = self._get_novelty_detector()
+        detector = self._get_topic_change_detector()
         catalog = self._get_topic_catalog()
         
-        # Run novelty detection
+        # Run topic change detection
         result = detector.detect(content, document_id=document_id, use_llm=use_llm)
         
         now = datetime.now(UTC)
         
         if result.decision == "create":
-            # Create new topic
-            topic = TopicEntry(
-                name=result.topic_name,
-                summary=self._generate_topic_summary(content),
-                status="active",
-                created_at=now,
-                updated_at=now,
-                last_activity_at=now,
-            )
-            
-            references = [{"document_id": document_id}] if document_id else []
-            assignment = TopicAssignment(
-                topic_name=topic.name,
-                document_id=document_id or 0,
-                assigned_at=now,
-                rationale=result.rationale,
-                similarity_score=0.0,
-                scores=result.similarity_scores,
-                decision_method="embedding" if not use_llm else "llm",
-            )
-            
-            save_result = catalog.save_topic(topic, references=references, assignments=[assignment])
-            
-            if save_result:
-                return Message(
-                    content=f"[topic] Created new topic '{topic.name}'. {result.rationale}",
-                    role=Role.SYSTEM,
-                )
-            return Message(
-                content=f"[topic] Failed to create topic '{topic.name}'.",
-                role=Role.SYSTEM,
+            return self._handle_topic_create(
+                result, content, document_id, catalog, now, use_llm
             )
         
         elif result.decision == "reuse":
-            # Update existing topic
-            topic = catalog.get_topic(result.topic_name)
-            if not topic:
-                return Message(
-                    content=f"[topic] Topic '{result.topic_name}' not found for reuse.",
-                    role=Role.SYSTEM,
-                )
-            
-            topic.last_activity_at = now
-            
-            references = [{"document_id": document_id}] if document_id else []
-            assignment = TopicAssignment(
-                topic_name=topic.name,
-                document_id=document_id or 0,
-                assigned_at=now,
-                rationale=result.rationale,
-                similarity_score=result.similarity_scores.get(topic.name, 0.0),
-                scores=result.similarity_scores,
-                decision_method="embedding" if not use_llm else "llm",
-            )
-            
-            save_result = catalog.save_topic(topic, references=references, assignments=[assignment])
-            
-            if save_result:
-                return Message(
-                    content=f"[topic] Assigned to existing topic '{topic.name}'. {result.rationale}",
-                    role=Role.SYSTEM,
-                )
-            return Message(
-                content=f"[topic] Failed to update topic '{topic.name}'.",
-                role=Role.SYSTEM,
+            return self._handle_topic_reuse(
+                result, document_id, catalog, now, use_llm
             )
         
         elif result.decision == "merge":
-            # Merge into existing topic
-            target_name = result.merge_into or result.topic_name
-            topic = catalog.get_topic(target_name)
-            if not topic:
-                return Message(
-                    content=f"[topic] Merge target '{target_name}' not found.",
-                    role=Role.SYSTEM,
-                )
-            
-            topic.last_activity_at = now
-            # Potentially update summary to reflect merged content
-            
-            references = [{"document_id": document_id}] if document_id else []
-            assignment = TopicAssignment(
-                topic_name=topic.name,
-                document_id=document_id or 0,
-                assigned_at=now,
-                rationale=f"Merged: {result.rationale}",
-                similarity_score=result.similarity_scores.get(topic.name, 0.0),
-                scores=result.similarity_scores,
-                decision_method="llm",
+            return self._handle_topic_merge(
+                result, content, document_id, catalog, now
             )
-            
-            save_result = catalog.save_topic(topic, references=references, assignments=[assignment])
-            
-            if save_result:
-                return Message(
-                    content=f"[topic] Merged into topic '{topic.name}'. {result.rationale}",
-                    role=Role.SYSTEM,
-                )
-            return Message(
-                content=f"[topic] Failed to merge into topic '{topic.name}'.",
-                role=Role.SYSTEM,
+        
+        elif result.decision == "split":
+            return self._handle_topic_split(
+                result, content, document_id, catalog, now
+            )
+        
+        elif result.decision == "rename":
+            return self._handle_topic_rename(
+                result, document_id, catalog, now
             )
         
         return Message(
             content=f"[topic] Unknown decision: {result.decision}",
+            role=Role.SYSTEM,
+        )
+
+    def _handle_topic_create(
+        self, result, content: str, document_id: Optional[int],
+        catalog, now: datetime, use_llm: bool
+    ) -> Message:
+        """Handle topic create operation."""
+        from topic_catalog import TopicEntry, TopicAssignment
+        
+        topic = TopicEntry(
+            name=result.topic_name,
+            summary=self._generate_topic_summary(content),
+            status="active",
+            created_at=now,
+            updated_at=now,
+            last_activity_at=now,
+        )
+        
+        references = [{"document_id": document_id}] if document_id else []
+        assignment = TopicAssignment(
+            topic_name=topic.name,
+            document_id=document_id or 0,
+            assigned_at=now,
+            rationale=result.rationale,
+            similarity_score=0.0,
+            scores=result.similarity_scores,
+            decision_method="embedding" if not use_llm else "llm",
+        )
+        
+        save_result = catalog.save_topic(topic, references=references, assignments=[assignment])
+        
+        if save_result:
+            return Message(
+                content=f"[topic] Created new topic '{topic.name}'. {result.rationale}",
+                role=Role.SYSTEM,
+            )
+        return Message(
+            content=f"[topic] Failed to create topic '{topic.name}'.",
+            role=Role.SYSTEM,
+        )
+
+    def _handle_topic_reuse(
+        self, result, document_id: Optional[int],
+        catalog, now: datetime, use_llm: bool
+    ) -> Message:
+        """Handle topic reuse operation."""
+        from topic_catalog import TopicAssignment
+        
+        topic = catalog.get_topic(result.topic_name)
+        if not topic:
+            return Message(
+                content=f"[topic] Topic '{result.topic_name}' not found for reuse.",
+                role=Role.SYSTEM,
+            )
+        
+        topic.last_activity_at = now
+        
+        references = [{"document_id": document_id}] if document_id else []
+        assignment = TopicAssignment(
+            topic_name=topic.name,
+            document_id=document_id or 0,
+            assigned_at=now,
+            rationale=result.rationale,
+            similarity_score=result.similarity_scores.get(topic.name, 0.0),
+            scores=result.similarity_scores,
+            decision_method="embedding" if not use_llm else "llm",
+        )
+        
+        save_result = catalog.save_topic(topic, references=references, assignments=[assignment])
+        
+        if save_result:
+            return Message(
+                content=f"[topic] Assigned to existing topic '{topic.name}'. {result.rationale}",
+                role=Role.SYSTEM,
+            )
+        return Message(
+            content=f"[topic] Failed to update topic '{topic.name}'.",
+            role=Role.SYSTEM,
+        )
+
+    def _handle_topic_merge(
+        self, result, content: str, document_id: Optional[int],
+        catalog, now: datetime
+    ) -> Message:
+        """Handle topic merge operation."""
+        from topic_catalog import TopicAssignment
+        
+        target_name = result.topic_name
+        source_name = result.merge_from
+        
+        target_topic = catalog.get_topic(target_name)
+        if not target_topic:
+            return Message(
+                content=f"[topic] Merge target '{target_name}' not found.",
+                role=Role.SYSTEM,
+            )
+        
+        # Archive the source topic if specified
+        if source_name:
+            source_topic = catalog.get_topic(source_name)
+            if source_topic:
+                # Update target summary to incorporate source
+                merged_summary = f"{target_topic.summary}\n\n(Merged from '{source_name}': {source_topic.summary})"
+                target_topic.summary = merged_summary[:500]  # Limit length
+                
+                # Archive source topic
+                catalog.archive_topic(source_name)
+        
+        target_topic.last_activity_at = now
+        
+        references = [{"document_id": document_id}] if document_id else []
+        assignment = TopicAssignment(
+            topic_name=target_topic.name,
+            document_id=document_id or 0,
+            assigned_at=now,
+            rationale=f"Merged: {result.rationale}",
+            similarity_score=result.similarity_scores.get(target_topic.name, 0.0),
+            scores=result.similarity_scores,
+            decision_method="llm",
+        )
+        
+        save_result = catalog.save_topic(target_topic, references=references, assignments=[assignment])
+        
+        if save_result:
+            merge_msg = f" (merged from '{source_name}')" if source_name else ""
+            return Message(
+                content=f"[topic] Merged into topic '{target_topic.name}'{merge_msg}. {result.rationale}",
+                role=Role.SYSTEM,
+            )
+        return Message(
+            content=f"[topic] Failed to merge into topic '{target_topic.name}'.",
+            role=Role.SYSTEM,
+        )
+
+    def _handle_topic_split(
+        self, result, content: str, document_id: Optional[int],
+        catalog, now: datetime
+    ) -> Message:
+        """Handle topic split operation."""
+        from topic_catalog import TopicEntry, TopicAssignment
+        
+        source_name = result.topic_name
+        new_topic_name = result.split_into
+        
+        if not new_topic_name:
+            return Message(
+                content=f"[topic] Split requires new topic name.",
+                role=Role.SYSTEM,
+            )
+        
+        source_topic = catalog.get_topic(source_name)
+        if not source_topic:
+            return Message(
+                content=f"[topic] Split source '{source_name}' not found.",
+                role=Role.SYSTEM,
+            )
+        
+        # Create the new split topic
+        new_topic = TopicEntry(
+            name=new_topic_name,
+            summary=self._generate_topic_summary(content),
+            status="active",
+            created_at=now,
+            updated_at=now,
+            last_activity_at=now,
+            tags={"split_from": source_name},
+        )
+        
+        references = [{"document_id": document_id}] if document_id else []
+        assignment = TopicAssignment(
+            topic_name=new_topic.name,
+            document_id=document_id or 0,
+            assigned_at=now,
+            rationale=f"Split from '{source_name}': {result.rationale}",
+            similarity_score=0.0,
+            scores=result.similarity_scores,
+            decision_method="llm",
+        )
+        
+        save_result = catalog.save_topic(new_topic, references=references, assignments=[assignment])
+        
+        if save_result:
+            return Message(
+                content=f"[topic] Split '{new_topic_name}' from '{source_name}'. {result.rationale}",
+                role=Role.SYSTEM,
+            )
+        return Message(
+            content=f"[topic] Failed to split topic '{new_topic_name}'.",
+            role=Role.SYSTEM,
+        )
+
+    def _handle_topic_rename(
+        self, result, document_id: Optional[int],
+        catalog, now: datetime
+    ) -> Message:
+        """Handle topic rename operation."""
+        from topic_catalog import TopicEntry, TopicAssignment
+        
+        old_name = result.rename_from
+        new_name = result.topic_name
+        
+        if not old_name:
+            return Message(
+                content=f"[topic] Rename requires old topic name.",
+                role=Role.SYSTEM,
+            )
+        
+        old_topic = catalog.get_topic(old_name)
+        if not old_topic:
+            return Message(
+                content=f"[topic] Topic '{old_name}' not found for rename.",
+                role=Role.SYSTEM,
+            )
+        
+        # Create new topic with updated name (preserving content)
+        new_topic = TopicEntry(
+            name=new_name,
+            summary=old_topic.summary,
+            status="active",
+            created_at=old_topic.created_at,
+            updated_at=now,
+            last_activity_at=now,
+            tags={"renamed_from": old_name, **old_topic.tags},
+        )
+        
+        references = [{"document_id": document_id}] if document_id else []
+        assignment = TopicAssignment(
+            topic_name=new_topic.name,
+            document_id=document_id or 0,
+            assigned_at=now,
+            rationale=f"Renamed from '{old_name}': {result.rationale}",
+            similarity_score=result.similarity_scores.get(old_name, 0.0),
+            scores=result.similarity_scores,
+            decision_method="llm",
+        )
+        
+        # Archive old topic
+        catalog.archive_topic(old_name)
+        
+        save_result = catalog.save_topic(new_topic, references=references, assignments=[assignment])
+        
+        if save_result:
+            return Message(
+                content=f"[topic] Renamed '{old_name}' to '{new_name}'. {result.rationale}",
+                role=Role.SYSTEM,
+            )
+        return Message(
+            content=f"[topic] Failed to rename topic to '{new_name}'.",
             role=Role.SYSTEM,
         )
 

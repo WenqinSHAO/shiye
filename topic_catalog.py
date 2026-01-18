@@ -1,10 +1,11 @@
-"""Topic catalog and novelty detection for lifelong summarization (Phase 3).
+"""Topic catalog and change detection for lifelong summarization (Phase 3).
 
 This module implements:
 - TopicEntry: Data structure for topic catalog entries
 - TopicAssignment: Data structure for tracking document-topic assignments
-- TopicCatalog: Manager for topic persistence and novelty detection
-- NoveltyDetector: Hybrid pipeline for assigning content to topics
+- TopicCatalog: Manager for topic persistence
+- TopicChangeResult: Unified result for all topic operations
+- TopicChangeDetector: Hybrid pipeline for topic operations (create/reuse/merge/split)
 """
 
 from __future__ import annotations
@@ -124,14 +125,26 @@ class TopicAssignment:
 
 
 @dataclass
-class NoveltyResult:
-    """Result of novelty detection for a piece of content."""
-    decision: str  # "reuse", "create", "merge"
-    topic_name: str
-    rationale: str
+class TopicChangeResult:
+    """Unified result for topic change operations.
+    
+    Supports all topic operations: create, reuse, merge, split, rename.
+    """
+    decision: str  # "reuse", "create", "merge", "split", "rename"
+    topic_name: str  # Primary topic name (target for reuse/merge, new name for create/split)
+    rationale: str  # Human-readable explanation
     similarity_scores: Dict[str, float] = field(default_factory=dict)
     top_candidates: List[Tuple[str, float]] = field(default_factory=list)
-    merge_into: Optional[str] = None  # For merge decisions
+    # Merge-specific: topic being merged into topic_name
+    merge_from: Optional[str] = None
+    # Split-specific: new topic created from splitting topic_name
+    split_into: Optional[str] = None
+    # Rename-specific: old name being renamed to topic_name
+    rename_from: Optional[str] = None
+
+
+# Keep NoveltyResult as alias for backward compatibility
+NoveltyResult = TopicChangeResult
 
 
 class TopicCatalog:
@@ -309,11 +322,18 @@ class TopicCatalog:
         return result is not None
 
 
-class NoveltyDetector:
-    """Hybrid pipeline for assigning content to topics.
+class TopicChangeDetector:
+    """Unified pipeline for topic change operations.
+    
+    Handles all topic operations consistently:
+    - REUSE: Assign content to an existing topic
+    - CREATE: Create a new topic for novel content
+    - MERGE: Merge content that bridges multiple topics into one
+    - SPLIT: Split content that represents a distinct subtopic
+    - RENAME: Suggest renaming a topic when content redefines it
     
     Uses embedding similarity as a prefilter, then optionally
-    invokes LLM for ambiguous cases (when configured).
+    invokes LLM for complex decisions (when configured).
     """
     
     def __init__(
@@ -324,7 +344,7 @@ class NoveltyDetector:
         similarity_threshold: float = 0.6,
         top_k: int = 3,
     ):
-        """Initialize novelty detector.
+        """Initialize topic change detector.
         
         Args:
             catalog: TopicCatalog for topic management
@@ -344,23 +364,23 @@ class NoveltyDetector:
         content: str,
         document_id: Optional[int] = None,
         use_llm: bool = True,
-    ) -> NoveltyResult:
-        """Detect whether content belongs to existing topic or is novel.
+    ) -> TopicChangeResult:
+        """Detect appropriate topic change operation for content.
         
         Args:
             content: Text content to analyze
             document_id: Optional document ID for tracking
-            use_llm: Whether to use LLM judge for ambiguous cases
+            use_llm: Whether to use LLM judge for complex decisions
             
         Returns:
-            NoveltyResult with decision and rationale
+            TopicChangeResult with decision and rationale
         """
         # Get topic embeddings
         topic_embeddings = self.catalog.get_topic_embeddings()
         
-        # If no topics exist, this is definitely novel
+        # If no topics exist, this is definitely a create
         if not topic_embeddings:
-            return NoveltyResult(
+            return TopicChangeResult(
                 decision="create",
                 topic_name=self._suggest_topic_name(content),
                 rationale="No existing topics in catalog; creating first topic.",
@@ -371,7 +391,7 @@ class NoveltyDetector:
         # Compute content embedding
         if not self.embedder:
             # Without embedder, default to creating new topic
-            return NoveltyResult(
+            return TopicChangeResult(
                 decision="create",
                 topic_name=self._suggest_topic_name(content),
                 rationale="No embedder available for similarity comparison.",
@@ -382,7 +402,7 @@ class NoveltyDetector:
         try:
             content_embedding = self.embedder.embed([content])[0]
         except Exception as e:
-            return NoveltyResult(
+            return TopicChangeResult(
                 decision="create",
                 topic_name=self._suggest_topic_name(content),
                 rationale=f"Embedding failed: {e}",
@@ -405,8 +425,8 @@ class NoveltyDetector:
         
         # Decision logic
         if best_score >= self.similarity_threshold:
-            # High confidence match
-            return NoveltyResult(
+            # High confidence match - reuse
+            return TopicChangeResult(
                 decision="reuse",
                 topic_name=best_topic,
                 rationale=f"High similarity ({best_score:.3f}) to existing topic '{best_topic}'.",
@@ -420,7 +440,7 @@ class NoveltyDetector:
         
         # Default to creating new topic for low similarity
         if best_score < 0.3:
-            return NoveltyResult(
+            return TopicChangeResult(
                 decision="create",
                 topic_name=self._suggest_topic_name(content),
                 rationale=f"Low similarity ({best_score:.3f}) to all topics; creating new topic.",
@@ -429,7 +449,7 @@ class NoveltyDetector:
             )
         
         # Moderate similarity without LLM - default to reuse
-        return NoveltyResult(
+        return TopicChangeResult(
             decision="reuse",
             topic_name=best_topic,
             rationale=f"Moderate similarity ({best_score:.3f}) to '{best_topic}'; reusing without LLM confirmation.",
@@ -442,27 +462,23 @@ class NoveltyDetector:
         content: str,
         top_candidates: List[Tuple[str, float]],
         all_scores: Dict[str, float],
-    ) -> NoveltyResult:
-        """Use LLM to make decision for ambiguous cases."""
+    ) -> TopicChangeResult:
+        """Use LLM to make decision for complex topic operations."""
         try:
+            from prompts import topic_change_instruction
+            
             # Build prompt context
             candidates_text = "\n".join(
                 f"- {name} (similarity: {score:.3f})"
                 for name, score in top_candidates
             )
             
-            instruction = (
-                "Given the following content and candidate topics, decide:\n"
-                "1. REUSE an existing topic (if content fits)\n"
-                "2. CREATE a new topic (if content is novel)\n"
-                "3. MERGE into a topic (if content bridges topics)\n\n"
-                f"Candidate topics:\n{candidates_text}\n\n"
-                "Return JSON with: decision ('reuse'/'create'/'merge'), "
-                "topic_name, rationale, merge_into (if merge)."
+            instruction = topic_change_instruction(
+                candidates=[c[0] for c in top_candidates],
+                candidates_with_scores=candidates_text,
             )
             
             # Call LLM judge
-            from datatypes import Message, Role
             result = self.llm_judge(
                 instruction=instruction,
                 recent_messages=content[:2000],  # Limit content length
@@ -472,13 +488,17 @@ class NoveltyDetector:
             # Parse LLM response
             try:
                 response = json.loads(result.payload_json or "{}")
-                return NoveltyResult(
-                    decision=response.get("decision", "create"),
+                decision = response.get("decision", "create")
+                
+                return TopicChangeResult(
+                    decision=decision,
                     topic_name=response.get("topic_name", self._suggest_topic_name(content)),
                     rationale=response.get("rationale", "LLM decision"),
                     similarity_scores=all_scores,
                     top_candidates=top_candidates,
-                    merge_into=response.get("merge_into"),
+                    merge_from=response.get("merge_from"),
+                    split_into=response.get("split_into"),
+                    rename_from=response.get("rename_from"),
                 )
             except (json.JSONDecodeError, AttributeError):
                 # Fallback if LLM response is malformed
@@ -489,12 +509,89 @@ class NoveltyDetector:
         
         # Fallback to highest similarity
         best_topic, best_score = top_candidates[0]
-        return NoveltyResult(
+        return TopicChangeResult(
             decision="reuse",
             topic_name=best_topic,
             rationale=f"LLM unavailable; defaulting to highest similarity ({best_score:.3f}).",
             similarity_scores=all_scores,
             top_candidates=top_candidates,
+        )
+    
+    def merge_topics(
+        self,
+        source_name: str,
+        target_name: str,
+        rationale: str = "",
+    ) -> TopicChangeResult:
+        """Explicitly merge one topic into another.
+        
+        Args:
+            source_name: Topic to merge from (will be archived)
+            target_name: Topic to merge into (will be updated)
+            rationale: Reason for merge
+            
+        Returns:
+            TopicChangeResult for the merge operation
+        """
+        source = self.catalog.get_topic(source_name)
+        target = self.catalog.get_topic(target_name)
+        
+        if not source:
+            return TopicChangeResult(
+                decision="merge",
+                topic_name=target_name,
+                rationale=f"Merge failed: source topic '{source_name}' not found.",
+                merge_from=source_name,
+            )
+        
+        if not target:
+            return TopicChangeResult(
+                decision="merge",
+                topic_name=target_name,
+                rationale=f"Merge failed: target topic '{target_name}' not found.",
+                merge_from=source_name,
+            )
+        
+        return TopicChangeResult(
+            decision="merge",
+            topic_name=target_name,
+            rationale=rationale or f"Merging '{source_name}' into '{target_name}'.",
+            merge_from=source_name,
+        )
+    
+    def split_topic(
+        self,
+        source_name: str,
+        new_topic_name: str,
+        content: str,
+        rationale: str = "",
+    ) -> TopicChangeResult:
+        """Split content from an existing topic into a new one.
+        
+        Args:
+            source_name: Topic to split from
+            new_topic_name: Name for the new topic
+            content: Content for the new topic
+            rationale: Reason for split
+            
+        Returns:
+            TopicChangeResult for the split operation
+        """
+        source = self.catalog.get_topic(source_name)
+        
+        if not source:
+            return TopicChangeResult(
+                decision="split",
+                topic_name=new_topic_name,
+                rationale=f"Split failed: source topic '{source_name}' not found.",
+                split_into=new_topic_name,
+            )
+        
+        return TopicChangeResult(
+            decision="split",
+            topic_name=source_name,
+            rationale=rationale or f"Splitting '{new_topic_name}' from '{source_name}'.",
+            split_into=new_topic_name,
         )
     
     def _suggest_topic_name(self, content: str) -> str:
@@ -509,3 +606,7 @@ class NoveltyDetector:
         
         # Fallback
         return f"Topic_{datetime.now(UTC).strftime('%Y%m%d_%H%M')}"
+
+
+# Keep NoveltyDetector as alias for backward compatibility
+NoveltyDetector = TopicChangeDetector

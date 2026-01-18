@@ -109,7 +109,7 @@ Test file: `tests/test_lifelong_summary.py` (Phase 1–2 coverage)
 
 ---
 
-## Phase 3: Topic Catalog & Novelty Detection
+## Phase 3: Topic Catalog & Unified Change Detection
 
 ### Core data structures (`topic_catalog.py`)
 
@@ -141,16 +141,18 @@ class TopicAssignment:
     decision_method: str              # "embedding", "llm", or "manual"
 ```
 
-#### NoveltyResult
+#### TopicChangeResult (unified)
 ```python
 @dataclass
-class NoveltyResult:
-    decision: str                     # "reuse", "create", or "merge"
-    topic_name: str                   # Selected or new topic name
+class TopicChangeResult:
+    decision: str                     # "reuse", "create", "merge", "split", "rename"
+    topic_name: str                   # Primary topic name
     rationale: str                    # Explanation of decision
     similarity_scores: Dict[str, float]  # All similarity scores
     top_candidates: List[Tuple[str, float]]  # Top-k candidates
-    merge_into: Optional[str]         # Target for merge decisions
+    merge_from: Optional[str]         # Source topic for merge
+    split_into: Optional[str]         # New topic for split
+    rename_from: Optional[str]        # Old name for rename
 ```
 
 ### Topic persistence (document-based, Option B)
@@ -175,33 +177,52 @@ Manager class for topic operations:
 - `get_topic_embeddings()`: Compute embeddings for all active topics
 - `archive_topic(name)`: Mark a topic as archived
 
-### NoveltyDetector
+### TopicChangeDetector (unified)
 
-Hybrid pipeline for topic assignment:
+Unified pipeline for all topic change operations. Handles:
+- **REUSE**: Assign content to an existing topic (high similarity)
+- **CREATE**: Create a new topic for novel content (low similarity)
+- **MERGE**: Combine multiple topics when content bridges them
+- **SPLIT**: Separate a subtopic from an existing topic
+- **RENAME**: Update topic name when content redefines it
+
+Pipeline:
 1. **Embedding prefilter**: Compute similarity between content and all topic embeddings
 2. **Decision logic**:
-   - High similarity (≥ threshold): Reuse existing topic
+   - High similarity (≥ 0.6): Reuse existing topic
    - Low similarity (< 0.3): Create new topic
-   - Ambiguous: Use LLM judge if available, else default to highest match
-3. **Output**: `NoveltyResult` with decision, rationale, and score trace
+   - Ambiguous: Use LLM judge with unified prompt for all operations
+3. **Output**: `TopicChangeResult` with decision, rationale, and operation-specific fields
+
+Additional methods:
+- `merge_topics(source, target, rationale)`: Explicit topic merge
+- `split_topic(source, new_name, content, rationale)`: Explicit topic split
 
 ### Entry points (orchestrator.py)
 
 - `Orchestrator.list_topics(status)`: List topics in catalog
-- `Orchestrator.assign_to_topic(content, document_id, use_llm)`: Main assignment entry point
+- `Orchestrator.assign_to_topic(content, document_id, use_llm)`: Main entry point for all topic operations
 - `Orchestrator.process_new_documents_for_topics(since, limit)`: Batch processing
+
+Internal handlers for each operation:
+- `_handle_topic_create()`: Create new topic
+- `_handle_topic_reuse()`: Assign to existing topic
+- `_handle_topic_merge()`: Merge topics (archives source)
+- `_handle_topic_split()`: Split into new topic
+- `_handle_topic_rename()`: Rename topic (archives old)
 
 ### Prompts (prompts.py)
 
 - `topic_summary_instruction()`: Generate brief topic overviews
-- `topic_assignment_instruction(candidates)`: LLM judge for ambiguous cases
+- `topic_assignment_instruction(candidates)`: Legacy prompt (backward compatibility)
+- `topic_change_instruction(candidates, candidates_with_scores)`: Unified prompt for all operations
 
 ### Test coverage
 
-Test file: `tests/test_topic_catalog.py` (Phase 3 coverage)
+Test file: `tests/test_topic_catalog.py` (Phase 3 coverage, 21 tests)
 - `TestTopicEntry`: Payload conversion and document parsing
 - `TestTopicAssignment`: Score tracking and serialization
 - `TestTopicCatalog`: Save/get/list/archive operations
-- `TestNoveltyDetector`: Embedding similarity and decision logic
+- `TestTopicChangeDetector`: Unified detection, merge, split operations
 - `TestOrchestratorTopics`: Integration with orchestrator
-- `TestPhase3Prompts`: New prompt functions
+- `TestPhase3Prompts`: Prompt functions including unified prompt

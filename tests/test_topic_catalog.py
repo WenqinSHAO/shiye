@@ -286,21 +286,21 @@ class TestTopicCatalog:
             assert embeddings["AI"].shape == (embedder.dim,)
 
 
-# --- NoveltyDetector tests ---
+# --- TopicChangeDetector tests ---
 
 
-class TestNoveltyDetector:
-    """Tests for NoveltyDetector novelty detection."""
+class TestTopicChangeDetector:
+    """Tests for TopicChangeDetector (unified topic operations)."""
 
     def test_detect_creates_new_topic_when_empty_catalog(self):
         with tempfile.TemporaryDirectory() as tmp:
             store, cfg = make_store(tmp)
 
-            from topic_catalog import TopicCatalog, NoveltyDetector
+            from topic_catalog import TopicCatalog, TopicChangeDetector
 
             embedder = FakeEmbedder()
             catalog = TopicCatalog(store=store, embedder=embedder)
-            detector = NoveltyDetector(catalog=catalog, embedder=embedder)
+            detector = TopicChangeDetector(catalog=catalog, embedder=embedder)
 
             result = detector.detect("Content about a brand new topic")
 
@@ -312,7 +312,7 @@ class TestNoveltyDetector:
         with tempfile.TemporaryDirectory() as tmp:
             store, cfg = make_store(tmp)
 
-            from topic_catalog import TopicCatalog, TopicEntry, NoveltyDetector
+            from topic_catalog import TopicCatalog, TopicEntry, TopicChangeDetector
 
             embedder = FakeEmbedder()
             catalog = TopicCatalog(store=store, embedder=embedder)
@@ -322,7 +322,7 @@ class TestNoveltyDetector:
             catalog.save_topic(topic)
 
             # Use same content for high similarity
-            detector = NoveltyDetector(
+            detector = TopicChangeDetector(
                 catalog=catalog,
                 embedder=embedder,
                 similarity_threshold=0.5,  # Lower threshold for test
@@ -337,7 +337,7 @@ class TestNoveltyDetector:
         with tempfile.TemporaryDirectory() as tmp:
             store, cfg = make_store(tmp)
 
-            from topic_catalog import TopicCatalog, TopicEntry, NoveltyDetector
+            from topic_catalog import TopicCatalog, TopicEntry, TopicChangeDetector
 
             embedder = FakeEmbedder()
             catalog = TopicCatalog(store=store, embedder=embedder)
@@ -346,7 +346,7 @@ class TestNoveltyDetector:
             topic = TopicEntry(name="AI", summary="Artificial intelligence")
             catalog.save_topic(topic)
 
-            detector = NoveltyDetector(
+            detector = TopicChangeDetector(
                 catalog=catalog,
                 embedder=embedder,
                 similarity_threshold=0.99,  # Very high threshold
@@ -362,7 +362,7 @@ class TestNoveltyDetector:
         with tempfile.TemporaryDirectory() as tmp:
             store, cfg = make_store(tmp)
 
-            from topic_catalog import TopicCatalog, TopicEntry, NoveltyDetector
+            from topic_catalog import TopicCatalog, TopicEntry, TopicChangeDetector
 
             embedder = FakeEmbedder()
             catalog = TopicCatalog(store=store, embedder=embedder)
@@ -372,12 +372,65 @@ class TestNoveltyDetector:
                 topic = TopicEntry(name=name, summary=f"Summary for {name}")
                 catalog.save_topic(topic)
 
-            detector = NoveltyDetector(catalog=catalog, embedder=embedder, top_k=3)
+            detector = TopicChangeDetector(catalog=catalog, embedder=embedder, top_k=3)
 
             result = detector.detect("Some test content")
 
             assert len(result.top_candidates) <= 3
             assert len(result.similarity_scores) == 4  # All topics
+
+    def test_merge_topics_returns_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, cfg = make_store(tmp)
+
+            from topic_catalog import TopicCatalog, TopicEntry, TopicChangeDetector
+
+            embedder = FakeEmbedder()
+            catalog = TopicCatalog(store=store, embedder=embedder)
+
+            # Create two topics
+            topic1 = TopicEntry(name="ML Basics", summary="Machine learning fundamentals")
+            topic2 = TopicEntry(name="Deep Learning", summary="Neural networks and deep learning")
+            catalog.save_topic(topic1)
+            catalog.save_topic(topic2)
+
+            detector = TopicChangeDetector(catalog=catalog, embedder=embedder)
+
+            result = detector.merge_topics(
+                source_name="ML Basics",
+                target_name="Deep Learning",
+                rationale="ML Basics is a subset of Deep Learning"
+            )
+
+            assert result.decision == "merge"
+            assert result.topic_name == "Deep Learning"
+            assert result.merge_from == "ML Basics"
+
+    def test_split_topic_returns_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, cfg = make_store(tmp)
+
+            from topic_catalog import TopicCatalog, TopicEntry, TopicChangeDetector
+
+            embedder = FakeEmbedder()
+            catalog = TopicCatalog(store=store, embedder=embedder)
+
+            # Create a topic
+            topic = TopicEntry(name="Machine Learning", summary="All ML topics")
+            catalog.save_topic(topic)
+
+            detector = TopicChangeDetector(catalog=catalog, embedder=embedder)
+
+            result = detector.split_topic(
+                source_name="Machine Learning",
+                new_topic_name="Reinforcement Learning",
+                content="RL is a distinct area",
+                rationale="RL deserves its own topic"
+            )
+
+            assert result.decision == "split"
+            assert result.topic_name == "Machine Learning"
+            assert result.split_into == "Reinforcement Learning"
 
 
 # --- Orchestrator topic methods tests ---
@@ -506,3 +559,26 @@ class TestPhase3Prompts:
         assert "NLP" in instruction
         assert "REUSE" in instruction
         assert "CREATE" in instruction
+
+    def test_topic_change_instruction_includes_all_operations(self):
+        from prompts import topic_change_instruction
+
+        instruction = topic_change_instruction(
+            candidates=["AI", "ML"],
+            candidates_with_scores="- AI (similarity: 0.8)\n- ML (similarity: 0.6)"
+        )
+
+        # Check all operations are mentioned
+        assert "REUSE" in instruction
+        assert "CREATE" in instruction
+        assert "MERGE" in instruction
+        assert "SPLIT" in instruction
+        assert "RENAME" in instruction
+
+        # Check candidates are included
+        assert "AI" in instruction
+        assert "ML" in instruction
+
+        # Check decision criteria are provided
+        assert "decision" in instruction.lower()
+        assert "rationale" in instruction.lower()
