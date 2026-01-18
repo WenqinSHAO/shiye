@@ -83,6 +83,7 @@ class Orchestrator:
         self.dspy_chunker = dspy.Predict(TimeChunker) if llm_key else None
         self.dspy_summarizer = dspy.Predict(LifelongSummarySignature) if llm_key else None
         self.last_llm_trace: Optional[dict] = None
+        self.last_summary_trace: Optional[dict] = None  # Phase 4: Debug info for summarization
         self.last_search_context = None  # Cache last search context for reuse
         self.last_search_time = None  # Track when we last searched
         self.bootstrap_doc_types = [
@@ -260,6 +261,7 @@ class Orchestrator:
         manual: bool = False,
         facet: Optional[str] = None,
         key: Optional[str] = None,
+        debug: bool = False,
     ) -> Message:
         """Summarize recent activity into a lifelong summary.
         
@@ -267,7 +269,20 @@ class Orchestrator:
             manual: Whether this is a manual trigger (bypasses cadence check)
             facet: Top-level category ("profile", "topics", "timeline")
             key: Sub-identifier within facet (e.g., "interests", "AI")
+            debug: Whether to collect debug information
         """
+        # Initialize debug trace
+        summary_trace = {
+            "ts": datetime.now(UTC).isoformat(),
+            "trigger": "manual" if manual else "scheduled",
+            "facet": facet,
+            "key": key,
+            "documents_included": [],
+            "affinity_matrix": None,
+            "llm_context": None,
+            "llm_response": None,
+        } if debug else None
+        
         # For profile and timeline facets, key is not used in bootstrap (whole-facet summary)
         if manual and not facet and not key:
             latest_summary = self.workspace.get_latest_lifelong_summary()
@@ -299,6 +314,20 @@ class Orchestrator:
                 role=Role.SYSTEM,
             )
 
+        # Track documents for debug
+        if summary_trace:
+            summary_trace["documents_included"] = [
+                {
+                    "chunk_id": m.metadata.get("chunk_id"),
+                    "doc_id": m.metadata.get("doc_id"),
+                    "doc_type": m.metadata.get("doc_type"),
+                    "role": m.role.value if hasattr(m, "role") else "unknown",
+                    "content_preview": (m.content or "")[:200],
+                }
+                for m in recent_messages
+            ]
+            summary_trace["message_count"] = len(recent_messages)
+
         references = [m.metadata.get("chunk_id") for m in recent_messages if m.metadata.get("chunk_id")]
         payload = {
             "facet": facet,
@@ -313,6 +342,8 @@ class Orchestrator:
         affinity_context = self._build_topic_affinity_context(since_dt)
         if affinity_context:
             recent_text = f"{affinity_context}\n\n{recent_text}".strip()
+            if summary_trace:
+                summary_trace["affinity_matrix"] = affinity_context
         previous_summary_text = ""
         if latest and latest.get("id"):
             try:
@@ -331,6 +362,15 @@ class Orchestrator:
                         facet=facet,
                         is_delta=bool(previous_summary_text),
                     )
+                
+                # Track LLM context for debug
+                if summary_trace:
+                    summary_trace["llm_context"] = {
+                        "instruction": instruction,
+                        "recent_messages_length": len(recent_text),
+                        "previous_summary_length": len(previous_summary_text),
+                    }
+                
                 out = self.dspy_summarizer(
                     instruction=instruction,
                     recent_messages=recent_text,
@@ -338,10 +378,19 @@ class Orchestrator:
                 )
                 try:
                     payload_delta = json.loads(out.payload_json or "{}")
-                except Exception:
+                    if summary_trace:
+                        summary_trace["llm_response"] = {
+                            "payload_json_raw": out.payload_json,
+                            "payload_parsed": payload_delta,
+                        }
+                except Exception as e:
                     payload_delta = {}
+                    if summary_trace:
+                        summary_trace["llm_response"] = {"parse_error": str(e)}
             except Exception as e:
                 payload_delta = {"notes": f"LLM summary failed: {e}"}
+                if summary_trace:
+                    summary_trace["llm_response"] = {"error": str(e)}
 
         if payload_delta:
             payload = {**payload, **payload_delta}
@@ -375,6 +424,12 @@ class Orchestrator:
             facet=facet,
             key=key,
         )
+        
+        # Store debug trace
+        if summary_trace:
+            summary_trace["result"] = result
+            self.last_summary_trace = summary_trace
+        
         if result and result.get("document_id"):
             return Message(
                 content=f"[summary] Saved summary document #{result['document_id']}.",
