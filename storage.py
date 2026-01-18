@@ -1717,7 +1717,7 @@ class LocalStore:
         self,
         limit: int = 20,
         facet: Optional[str] = None,
-        topic: Optional[str] = None,
+        key: Optional[str] = None,
     ) -> List[dict]:
         with self._connect() as conn:
             cur = conn.cursor()
@@ -1736,7 +1736,7 @@ class LocalStore:
             tags = json.loads(row["tags"]) if row["tags"] else {}
             if facet and tags.get("facet") != facet:
                 continue
-            if topic and tags.get("topic") != topic:
+            if key and tags.get("key") != key:
                 continue
             summaries.append(
                 {
@@ -1756,9 +1756,9 @@ class LocalStore:
     def get_latest_lifelong_summary(
         self,
         facet: Optional[str] = None,
-        topic: Optional[str] = None,
+        key: Optional[str] = None,
     ) -> Optional[dict]:
-        summaries = self.list_lifelong_summaries(limit=50, facet=facet, topic=topic)
+        summaries = self.list_lifelong_summaries(limit=50, facet=facet, key=key)
         return summaries[0] if summaries else None
 
     def list_messages_since(

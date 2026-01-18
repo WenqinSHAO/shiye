@@ -2076,8 +2076,8 @@ def chat(payload=Body(...)) -> dict:
                 title = item.get("title") or "Summary"
                 tags = item.get("tags") or {}
                 facet_label = tags.get("facet") or ""
-                topic_label = tags.get("topic") or ""
-                label = " • ".join(p for p in [title, facet_label, topic_label, timestamp] if p)
+                key_label = tags.get("key") or ""
+                label = " • ".join(p for p in [title, facet_label, key_label, timestamp] if p)
                 lines.append(f"- #{item['id']} • {label}")
             return {"messages": [make_system_msg("\n".join(lines))]}
 

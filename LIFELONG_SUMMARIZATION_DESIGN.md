@@ -140,6 +140,7 @@
 - ✅ Add a `SummaryPlanner` helper (new module) that:
   - Determines snapshot vs delta per facet/topic.
   - Builds LLM request batches for bootstrap passes.
+  - Groups requests by time window for LLM KV cache optimization.
   - (Follow-up) track prompt versions and attach them to summary metadata.
 
 ### Phase 2: Bootstrap pipeline
@@ -147,6 +148,274 @@
   - Load raw documents by type (chat, note, rss, web, paper).
   - Run profile/topic/timeline passes with batching and cached prefixes.
   - Persist summaries per facet/topic with provenance metadata.
+- ✅ Optimize LLM API calls for KV cache hits:
+  - Document-first prompt structure: `[documents] + [instruction]`
+  - Batch processing ordered by time window, then facet
+  - All facets for same time window processed together
+
+---
+
+## Phase 1&2 Code Review Findings
+
+### Summary
+Phase 1&2 implementation reviewed and improved. Issues addressed include test coverage,
+documentation, LLM API optimization for KV cache utilization, and unified (facet, key) data model.
+
+### Issues Found and Resolutions
+
+#### Issue 1: Bootstrap references use document_id instead of chunk_id
+- **Status**: ✅ Acceptable - document-level references are appropriate for bootstrap since it
+  operates on raw_content, not chunked text. Design doc notes "document-level is usually enough."
+
+#### Issue 2: Missing test coverage
+- **Status**: ✅ Fixed - Added `tests/test_lifelong_summary.py` with tests covering
+  `LifelongSummary`, `SummaryPlanner`, prompts, and orchestrator flows.
+
+#### Issue 3: Suboptimal batch ordering for LLM KV cache
+- **Status**: ✅ Fixed - `SummaryPlanner.plan_bootstrap()` now groups requests by time window
+  first, then by facet, maximizing prefix reuse across facet passes.
+
+#### Issue 4: Instruction-first prompt structure misses KV cache
+- **Status**: ✅ Fixed - Implemented document-first prompt structure in `bootstrap_lifelong()`.
+  Documents appear before facet-specific instructions so LLM can cache the shared prefix.
+
+#### Issue 5: Inconsistent facet/topic data structure
+- **Status**: ✅ Fixed - Renamed `topic` to `key` to create a unified (facet, key) addressing model.
+  Now any facet type can have sub-identifiers: profile.interests, topics.AI, timeline.profile:interests.
+
+---
+
+## Current Implementation Details
+
+This section documents the actual implementation of Phase 1&2 functionality.
+
+### Data Structures
+
+#### Unified (facet, key) Addressing Model
+
+The `(facet, key)` pair uniquely identifies a summary within a time scope:
+- **facet**: Top-level category ("profile", "topics", "timeline")
+- **key**: Sub-identifier within the facet
+
+Examples:
+```
+facet: profile
+  ├── key: interests        → User interests summary
+  ├── key: objectives       → User objectives summary
+  └── key: preferences      → User preferences summary
+
+facet: topics
+  ├── key: AI               → AI topic summary
+  └── key: distributed_sys  → Distributed systems topic summary
+
+facet: timeline
+  ├── key: profile:interests → Timeline of interests changes
+  └── key: topics:AI         → Timeline of AI topic changes
+```
+
+#### LifelongSummary (lifelong_summary.py)
+
+```python
+@dataclass
+class LifelongSummary:
+    payload: Dict[str, Any]      # JSON payload for tools/LLM
+    markdown: str                 # Human-readable markdown
+    summary_date: datetime        # When summary was created
+    title: Optional[str]          # Optional title override
+    summary_source: str           # "system" or "user"
+    facet: Optional[str]          # "profile", "topics", or "timeline"
+    key: Optional[str]            # Sub-identifier within facet
+    uri: Optional[str]            # Optional URI reference
+    tags: Optional[Dict]          # Additional metadata tags
+```
+
+**Normalized Payload Structure:**
+```json
+{
+  "schema_version": "v0.9",
+  "language": "zh",
+  "summary_date": "2024-01-15",
+  "facet": "profile",
+  "key": "interests",
+  "facets": {
+    "profile": ["interest 1", "interest 2"],
+    "topics": [{"name": "AI", "summary": "..."}],
+    "timeline": [{"date": "2024-01-01", "event": "..."}]
+  },
+  "references": [{"document_id": 123}],
+  "prompt_version": "v0.9",
+  "trigger": "bootstrap"
+}
+```
+
+#### SummaryRequest (summary_planner.py)
+
+```python
+@dataclass
+class SummaryRequest:
+    facet: str                    # "profile", "topics", or "timeline"
+    key: Optional[str]            # Sub-identifier within facet
+    is_delta: bool                # True for incremental, False for snapshot
+    batch_label: str              # Human-readable label (e.g., "profile:2024-01-01")
+    since: Optional[datetime]     # Start of time window
+```
+
+### Bootstrap Workflow
+
+The `/sum bootstrap since:YYYY-MM-DD` command triggers the following workflow:
+
+```
+1. SummaryPlanner.plan_bootstrap() → List[SummaryRequest]
+   - Creates batches for each (facet × time_window) combination
+   - Time windows are batch_days apart (default: 30 days)
+   - All bootstrap requests have is_delta=False
+
+2. For each SummaryRequest:
+   a. Check batch_cache for (batch_start, batch_end) key
+   b. If cache miss:
+      - workspace.list_documents(doc_types, since, until)
+      - _format_bootstrap_documents(docs) → (text, references)
+      - _bootstrap_prefix(start, end, count) → prefix
+      - Store in batch_cache
+   c. Build initial payload with facet/references/bootstrap metadata
+   d. If LLM available: call dspy_summarizer with prefix + text
+   e. Merge LLM response into payload
+   f. workspace.save_lifelong_summary(payload, markdown, ...)
+
+3. Return completion message with saved/skipped counts
+```
+
+### Batch Caching Strategy (Token Economy)
+
+The batch cache implements token savings for bootstrap operations:
+
+**What's Cached:**
+```python
+batch_cache: dict[
+    tuple[datetime, datetime],  # (batch_start, batch_end)
+    tuple[str, str, list[dict], int]  # (prefix, recent_text, references, doc_count)
+]
+```
+
+**How It Saves Tokens:**
+
+When bootstrapping multiple facets (profile, topics, timeline) for the same time window:
+- Document content is fetched and formatted **once** per time window
+- The same `recent_text` is reused for all facets in that window
+- Only the LLM instruction differs between facets
+
+**Example with 3 facets, 2 time windows:**
+```
+Without caching: 6 document fetches, 6 text formatting operations
+With caching:    2 document fetches, 2 text formatting operations
+                 (3x reduction in I/O and processing)
+```
+
+**LLM API Prefix Caching:**
+
+While the code-level `batch_cache` saves processing overhead, the actual LLM API
+prefix caching depends on the provider (e.g., Anthropic's prompt caching, DeepSeek's
+context caching). The implementation prepends a static header to each request:
+
+```
+Bootstrap batch context.
+Window: 2024-01-01 to 2024-01-31.
+Document count: 42.
+
+[document content follows...]
+```
+
+When the LLM provider supports prefix caching, the repeated document content
+across facet requests may be served from the provider's cache, further reducing
+token costs.
+
+### Prompt Facet Customization
+
+The `lifelong_summary_instruction(facet, is_delta)` function returns customized
+prompts for each facet:
+
+| Facet | Focus | Key Phrases |
+|-------|-------|-------------|
+| `profile` | User interests/objectives | "Focus on user interests/objectives; ignore topic details" |
+| `topics` | Thematic updates | "Focus on topic-level updates and emerging themes" |
+| `timeline` | Chronological changes | "Focus on chronological changes derived from profile/topics" |
+
+Delta mode prepends: "Summarize only deltas/new changes since previous_summary"
+Snapshot mode prepends: "Produce a full snapshot when previous_summary is empty"
+
+### Reference Handling
+
+**During Bootstrap:**
+- References use `document_id` (not `chunk_id`) since bootstrap operates on raw content
+- This is consistent with design doc guidance: "Document-level is usually enough for
+  papers/web/GitHub issues/PRs"
+
+**During Regular Summarization:**
+- References can include `chunk_id` from recent messages
+- The `merge_references()` function deduplicates references by JSON content
+
+### Test Coverage
+
+Test file: `tests/test_lifelong_summary.py` (33 tests)
+
+| Test Class | Coverage Area |
+|------------|---------------|
+| `TestLifelongSummary` | Dataclass methods, payload normalization, markdown rendering |
+| `TestSummaryPlanner` | Bootstrap planning, batch creation, delta planning |
+| `TestPrompts` | Facet-specific instructions, delta vs snapshot modes |
+| `TestOrchestratorLifelongSummary` | summarize_lifelong, bootstrap_lifelong, batch caching |
+| `TestWorkspaceLifelongSummary` | save/list/get lifelong summaries |
+
+---
+
+## Future Improvements (Analysis for Post-v0.9)
+
+This section documents potential improvements for future phases based on code review feedback.
+
+### Improvement 1: Unified (facet, key) Addressing Model ✅ (Implemented)
+
+**Problem:** The `topic` field was semantically overloaded—only useful for `facet="topics"` but profile
+could have sub-facets (interests, objectives) that couldn't be expressed.
+
+**Solution implemented:**
+- Renamed `topic` to `key` throughout the codebase
+- `(facet, key)` pair now uniquely identifies any summary
+- All facet types can have sub-identifiers: `profile.interests`, `topics.AI`, `timeline.profile:interests`
+
+**Data model:**
+```
+facet: profile
+  ├── key: interests      → payload: {...}
+  ├── key: objectives     → payload: {...}
+  └── key: preferences    → payload: {...}
+
+facet: topics
+  ├── key: AI             → payload: {...}
+  └── key: distributed_systems → payload: {...}
+
+facet: timeline
+  ├── key: "profile:interests" → payload: {...}
+  └── key: "topics:AI"         → payload: {...}
+```
+
+### Improvement 2: LLM API KV Cache Optimization ✅ (Implemented)
+
+**Problem:** Original instruction-first prompts prevented LLM API KV cache hits.
+
+**Solution implemented:**
+1. `SummaryPlanner.plan_bootstrap()` groups requests by time window, then facet
+2. Document-first prompt structure in `bootstrap_lifelong()`:
+   ```
+   [document_content] + [facet_instruction]
+   ```
+3. All facets for the same time window process sequentially
+
+**Result:** Document prefix is reused across facet passes for each time window.
+
+**Note on cost:** Most providers bill per token regardless of KV cache—benefit is latency,
+not cost. DeepSeek offers prompt caching with billing discounts.
+
+---
 
 ### Phase 3: Topic catalog + novelty
 - Create a `topics` table (id, name, summary, last_updated, status).
