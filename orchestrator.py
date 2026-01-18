@@ -564,6 +564,273 @@ class Orchestrator:
             f"Document count: {doc_count}."
         )
 
+    # --- Phase 3: Topic catalog methods ---
+
+    def _get_topic_catalog(self):
+        """Get or create topic catalog instance."""
+        if not hasattr(self, "_topic_catalog"):
+            from topic_catalog import TopicCatalog
+            embedder = self.workspace.store.embedder if self.workspace.store else None
+            self._topic_catalog = TopicCatalog(
+                store=self.workspace.store,
+                embedder=embedder,
+            )
+        return self._topic_catalog
+
+    def _get_novelty_detector(self):
+        """Get or create novelty detector instance."""
+        if not hasattr(self, "_novelty_detector"):
+            from topic_catalog import NoveltyDetector
+            catalog = self._get_topic_catalog()
+            self._novelty_detector = NoveltyDetector(
+                catalog=catalog,
+                embedder=catalog.embedder,
+                llm_judge=self.dspy_summarizer,
+            )
+        return self._novelty_detector
+
+    def list_topics(self, status: Optional[str] = None) -> List[dict]:
+        """List all topics in the catalog.
+        
+        Args:
+            status: Filter by status ('active', 'archived', or None for all)
+            
+        Returns:
+            List of topic dictionaries
+        """
+        catalog = self._get_topic_catalog()
+        topics = catalog.list_topics(status=status)
+        return [t.to_payload() for t in topics]
+
+    def assign_to_topic(
+        self,
+        content: str,
+        document_id: Optional[int] = None,
+        use_llm: bool = True,
+    ) -> Message:
+        """Assign content to a topic using novelty detection.
+        
+        This is the main entry point for Phase 3 topic assignment.
+        It uses the hybrid pipeline: embedding similarity + optional LLM judge.
+        
+        Args:
+            content: Text content to analyze
+            document_id: Optional document ID for tracking
+            use_llm: Whether to use LLM for ambiguous cases
+            
+        Returns:
+            Message with assignment result
+        """
+        from topic_catalog import TopicEntry, TopicAssignment
+        
+        detector = self._get_novelty_detector()
+        catalog = self._get_topic_catalog()
+        
+        # Run novelty detection
+        result = detector.detect(content, document_id=document_id, use_llm=use_llm)
+        
+        now = datetime.now(UTC)
+        
+        if result.decision == "create":
+            # Create new topic
+            topic = TopicEntry(
+                name=result.topic_name,
+                summary=self._generate_topic_summary(content),
+                status="active",
+                created_at=now,
+                updated_at=now,
+                last_activity_at=now,
+            )
+            
+            references = [{"document_id": document_id}] if document_id else []
+            assignment = TopicAssignment(
+                topic_name=topic.name,
+                document_id=document_id or 0,
+                assigned_at=now,
+                rationale=result.rationale,
+                similarity_score=0.0,
+                scores=result.similarity_scores,
+                decision_method="embedding" if not use_llm else "llm",
+            )
+            
+            save_result = catalog.save_topic(topic, references=references, assignments=[assignment])
+            
+            if save_result:
+                return Message(
+                    content=f"[topic] Created new topic '{topic.name}'. {result.rationale}",
+                    role=Role.SYSTEM,
+                )
+            return Message(
+                content=f"[topic] Failed to create topic '{topic.name}'.",
+                role=Role.SYSTEM,
+            )
+        
+        elif result.decision == "reuse":
+            # Update existing topic
+            topic = catalog.get_topic(result.topic_name)
+            if not topic:
+                return Message(
+                    content=f"[topic] Topic '{result.topic_name}' not found for reuse.",
+                    role=Role.SYSTEM,
+                )
+            
+            topic.last_activity_at = now
+            
+            references = [{"document_id": document_id}] if document_id else []
+            assignment = TopicAssignment(
+                topic_name=topic.name,
+                document_id=document_id or 0,
+                assigned_at=now,
+                rationale=result.rationale,
+                similarity_score=result.similarity_scores.get(topic.name, 0.0),
+                scores=result.similarity_scores,
+                decision_method="embedding" if not use_llm else "llm",
+            )
+            
+            save_result = catalog.save_topic(topic, references=references, assignments=[assignment])
+            
+            if save_result:
+                return Message(
+                    content=f"[topic] Assigned to existing topic '{topic.name}'. {result.rationale}",
+                    role=Role.SYSTEM,
+                )
+            return Message(
+                content=f"[topic] Failed to update topic '{topic.name}'.",
+                role=Role.SYSTEM,
+            )
+        
+        elif result.decision == "merge":
+            # Merge into existing topic
+            target_name = result.merge_into or result.topic_name
+            topic = catalog.get_topic(target_name)
+            if not topic:
+                return Message(
+                    content=f"[topic] Merge target '{target_name}' not found.",
+                    role=Role.SYSTEM,
+                )
+            
+            topic.last_activity_at = now
+            # Potentially update summary to reflect merged content
+            
+            references = [{"document_id": document_id}] if document_id else []
+            assignment = TopicAssignment(
+                topic_name=topic.name,
+                document_id=document_id or 0,
+                assigned_at=now,
+                rationale=f"Merged: {result.rationale}",
+                similarity_score=result.similarity_scores.get(topic.name, 0.0),
+                scores=result.similarity_scores,
+                decision_method="llm",
+            )
+            
+            save_result = catalog.save_topic(topic, references=references, assignments=[assignment])
+            
+            if save_result:
+                return Message(
+                    content=f"[topic] Merged into topic '{topic.name}'. {result.rationale}",
+                    role=Role.SYSTEM,
+                )
+            return Message(
+                content=f"[topic] Failed to merge into topic '{topic.name}'.",
+                role=Role.SYSTEM,
+            )
+        
+        return Message(
+            content=f"[topic] Unknown decision: {result.decision}",
+            role=Role.SYSTEM,
+        )
+
+    def _generate_topic_summary(self, content: str) -> str:
+        """Generate a brief summary for a new topic."""
+        if self.dspy_summarizer:
+            try:
+                from prompts import topic_summary_instruction
+                instruction = topic_summary_instruction()
+                out = self.dspy_summarizer(
+                    instruction=instruction,
+                    recent_messages=content[:4000],  # Limit content
+                    previous_summary="",
+                )
+                try:
+                    payload = json.loads(out.payload_json or "{}")
+                    return payload.get("summary") or content[:200]
+                except (json.JSONDecodeError, AttributeError):
+                    pass
+            except Exception as e:
+                print(f"[warn] Topic summary generation failed: {e}")
+        
+        # Fallback: use first lines of content
+        lines = content.strip().split("\n")[:3]
+        return " ".join(line.strip() for line in lines if line.strip())[:200]
+
+    def process_new_documents_for_topics(
+        self,
+        since: Optional[datetime] = None,
+        limit: int = 50,
+    ) -> Message:
+        """Process recent documents and assign them to topics.
+        
+        This is the batch entry point for topic assignment.
+        
+        Args:
+            since: Only process documents after this time
+            limit: Maximum documents to process
+            
+        Returns:
+            Message with processing summary
+        """
+        if not self.workspace.store:
+            return Message(
+                content="[topics] Store not available.",
+                role=Role.SYSTEM,
+            )
+        
+        # Get recent documents
+        documents = self.workspace.list_documents(
+            doc_types=self.bootstrap_doc_types,
+            since=since,
+            limit=limit,
+        )
+        
+        if not documents:
+            return Message(
+                content="[topics] No new documents to process.",
+                role=Role.SYSTEM,
+            )
+        
+        assigned = 0
+        created = 0
+        errors = 0
+        
+        for doc in documents:
+            doc_text = self._extract_document_text(doc)
+            if not doc_text or len(doc_text) < 50:
+                continue
+            
+            try:
+                result = self.assign_to_topic(
+                    content=doc_text,
+                    document_id=doc.get("id"),
+                    use_llm=bool(self.dspy_summarizer),
+                )
+                if "Created new" in result.content:
+                    created += 1
+                    assigned += 1
+                elif "Assigned" in result.content or "Merged" in result.content:
+                    assigned += 1
+                else:
+                    errors += 1
+            except Exception as e:
+                print(f"[warn] Topic assignment failed for doc {doc.get('id')}: {e}")
+                errors += 1
+        
+        return Message(
+            content=(
+                f"[topics] Processed {len(documents)} documents. "
+                f"Assigned: {assigned}, New topics: {created}, Errors: {errors}."
+            ),
+            role=Role.SYSTEM,
+        )
 
     def timelinereply(self, user_text: str) -> List[Message]:
    

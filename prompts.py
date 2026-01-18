@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
 
 
 LIFELONG_SUMMARY_PROMPT_VERSION = "v0.9"
@@ -55,4 +55,31 @@ def note_summary_instruction() -> str:
     return (
         "Summarize the note into concise bullet points, preserving key facts, decisions, and dates. "
         "If the note contains a timeline, keep it chronological."
+    )
+
+
+def topic_summary_instruction() -> str:
+    """Return the prompt for generating a topic summary (Phase 3)."""
+    return (
+        "Summarize the content into a brief topic overview. "
+        "Return JSON with key 'summary' containing a 1-2 sentence description "
+        "of what this topic is about. Use Chinese by default and keep it concise."
+    )
+
+
+def topic_assignment_instruction(*, candidates: List[str]) -> str:
+    """Return the prompt for topic assignment decision (Phase 3).
+    
+    Args:
+        candidates: List of candidate topic names to consider
+    """
+    candidates_text = ", ".join(f"'{c}'" for c in candidates) if candidates else "none"
+    return (
+        f"Given the content, decide whether to:\n"
+        f"1. REUSE an existing topic from candidates: {candidates_text}\n"
+        f"2. CREATE a new topic (if content is truly novel)\n"
+        f"3. MERGE topics (if content bridges multiple topics)\n\n"
+        "Return JSON with keys: decision ('reuse'/'create'/'merge'), "
+        "topic_name (selected or new name), rationale (brief explanation), "
+        "merge_into (target topic name, only if decision is 'merge')."
     )
