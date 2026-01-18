@@ -7,8 +7,19 @@ from typing import Iterable, List, Optional, Tuple
 
 @dataclass
 class SummaryRequest:
+    """Request for a summary operation.
+    
+    The (facet, key) pair uniquely identifies the summary target:
+    - facet: Top-level category ("profile", "topics", "timeline")
+    - key: Sub-identifier within facet (e.g., "interests", "AI", "profile:interests")
+    
+    Examples:
+    - (profile, interests): Summarize user interests
+    - (topics, AI): Summarize AI topic activity
+    - (timeline, None): Global timeline (key=None means whole facet)
+    """
     facet: str
-    topic: Optional[str]
+    key: Optional[str]  # Sub-identifier within facet (renamed from 'topic')
     is_delta: bool
     batch_label: str
     since: Optional[datetime]
@@ -51,7 +62,7 @@ class SummaryPlanner:
                 requests.append(
                     SummaryRequest(
                         facet=facet,
-                        topic=None,
+                        key=None,  # Bootstrap covers whole facet
                         is_delta=False,
                         batch_label=label,
                         since=window_start,
@@ -59,12 +70,13 @@ class SummaryPlanner:
                 )
         return requests
 
-    def plan_delta(self, *, facet: str, topic: Optional[str], since: Optional[datetime]) -> List[SummaryRequest]:
-        label = f"{facet}:{topic or 'global'}:{(since.date().isoformat() if since else 'all')}"
+    def plan_delta(self, *, facet: str, key: Optional[str], since: Optional[datetime]) -> List[SummaryRequest]:
+        """Plan a delta summarization request for a specific (facet, key) pair."""
+        label = f"{facet}:{key or 'global'}:{(since.date().isoformat() if since else 'all')}"
         return [
             SummaryRequest(
                 facet=facet,
-                topic=topic,
+                key=key,
                 is_delta=bool(since),
                 batch_label=label,
                 since=since,

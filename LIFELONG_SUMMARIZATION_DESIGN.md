@@ -159,7 +159,7 @@
 
 ### Summary
 Phase 1&2 implementation reviewed and improved. Issues addressed include test coverage,
-documentation, and LLM API optimization for KV cache utilization.
+documentation, LLM API optimization for KV cache utilization, and unified (facet, key) data model.
 
 ### Issues Found and Resolutions
 
@@ -168,7 +168,7 @@ documentation, and LLM API optimization for KV cache utilization.
   operates on raw_content, not chunked text. Design doc notes "document-level is usually enough."
 
 #### Issue 2: Missing test coverage
-- **Status**: ✅ Fixed - Added `tests/test_lifelong_summary.py` with 33 tests covering
+- **Status**: ✅ Fixed - Added `tests/test_lifelong_summary.py` with tests covering
   `LifelongSummary`, `SummaryPlanner`, prompts, and orchestrator flows.
 
 #### Issue 3: Suboptimal batch ordering for LLM KV cache
@@ -179,6 +179,10 @@ documentation, and LLM API optimization for KV cache utilization.
 - **Status**: ✅ Fixed - Implemented document-first prompt structure in `bootstrap_lifelong()`.
   Documents appear before facet-specific instructions so LLM can cache the shared prefix.
 
+#### Issue 5: Inconsistent facet/topic data structure
+- **Status**: ✅ Fixed - Renamed `topic` to `key` to create a unified (facet, key) addressing model.
+  Now any facet type can have sub-identifiers: profile.interests, topics.AI, timeline.profile:interests.
+
 ---
 
 ## Current Implementation Details
@@ -186,6 +190,28 @@ documentation, and LLM API optimization for KV cache utilization.
 This section documents the actual implementation of Phase 1&2 functionality.
 
 ### Data Structures
+
+#### Unified (facet, key) Addressing Model
+
+The `(facet, key)` pair uniquely identifies a summary within a time scope:
+- **facet**: Top-level category ("profile", "topics", "timeline")
+- **key**: Sub-identifier within the facet
+
+Examples:
+```
+facet: profile
+  ├── key: interests        → User interests summary
+  ├── key: objectives       → User objectives summary
+  └── key: preferences      → User preferences summary
+
+facet: topics
+  ├── key: AI               → AI topic summary
+  └── key: distributed_sys  → Distributed systems topic summary
+
+facet: timeline
+  ├── key: profile:interests → Timeline of interests changes
+  └── key: topics:AI         → Timeline of AI topic changes
+```
 
 #### LifelongSummary (lifelong_summary.py)
 
@@ -198,7 +224,7 @@ class LifelongSummary:
     title: Optional[str]          # Optional title override
     summary_source: str           # "system" or "user"
     facet: Optional[str]          # "profile", "topics", or "timeline"
-    topic: Optional[str]          # Topic name when facet="topics"
+    key: Optional[str]            # Sub-identifier within facet
     uri: Optional[str]            # Optional URI reference
     tags: Optional[Dict]          # Additional metadata tags
 ```
@@ -210,7 +236,7 @@ class LifelongSummary:
   "language": "zh",
   "summary_date": "2024-01-15",
   "facet": "profile",
-  "topic": null,
+  "key": "interests",
   "facets": {
     "profile": ["interest 1", "interest 2"],
     "topics": [{"name": "AI", "summary": "..."}],
@@ -228,7 +254,7 @@ class LifelongSummary:
 @dataclass
 class SummaryRequest:
     facet: str                    # "profile", "topics", or "timeline"
-    topic: Optional[str]          # Topic name for facet="topics"
+    key: Optional[str]            # Sub-identifier within facet
     is_delta: bool                # True for incremental, False for snapshot
     batch_label: str              # Human-readable label (e.g., "profile:2024-01-01")
     since: Optional[datetime]     # Start of time window
@@ -346,23 +372,22 @@ Test file: `tests/test_lifelong_summary.py` (33 tests)
 
 This section documents potential improvements for future phases based on code review feedback.
 
-### Improvement 1: Unified Key-Value Facet Model
+### Improvement 1: Unified (facet, key) Addressing Model ✅ (Implemented)
 
-**Current Structure:**
-```python
-facet: str              # "profile", "topics", or "timeline"
-topic: Optional[str]    # Only used when facet="topics"
-```
+**Problem:** The `topic` field was semantically overloaded—only useful for `facet="topics"` but profile
+could have sub-facets (interests, objectives) that couldn't be expressed.
 
-**Limitation:** `topic` is semantically overloaded; profile could have sub-facets (interests,
-objectives) but can't express them. Timeline can't reference which facet/topic it summarizes.
+**Solution implemented:**
+- Renamed `topic` to `key` throughout the codebase
+- `(facet, key)` pair now uniquely identifies any summary
+- All facet types can have sub-identifiers: `profile.interests`, `topics.AI`, `timeline.profile:interests`
 
-**Proposed Model:**
+**Data model:**
 ```
 facet: profile
   ├── key: interests      → payload: {...}
-  ├── key: life_objectives → payload: {...}
-  └── key: food_preferences → payload: {...}
+  ├── key: objectives     → payload: {...}
+  └── key: preferences    → payload: {...}
 
 facet: topics
   ├── key: AI             → payload: {...}
@@ -373,7 +398,7 @@ facet: timeline
   └── key: "topics:AI"         → payload: {...}
 ```
 
-**Benefit:** Consistent `(facet, key)` addressing across all facet types.
+**Backward compatibility:** Storage layer supports both `key` (new) and `topic` (legacy) tag names.
 
 ### Improvement 2: LLM API KV Cache Optimization ✅ (Implemented)
 

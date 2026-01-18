@@ -244,17 +244,24 @@ class Orchestrator:
         *,
         manual: bool = False,
         facet: Optional[str] = None,
-        topic: Optional[str] = None,
+        key: Optional[str] = None,
     ) -> Message:
-        if facet in {"profile", "timeline"}:
-            topic = None
-        if manual and not facet and not topic:
+        """Summarize recent activity into a lifelong summary.
+        
+        Args:
+            manual: Whether this is a manual trigger (bypasses cadence check)
+            facet: Top-level category ("profile", "topics", "timeline")
+            key: Sub-identifier within facet (e.g., "interests", "AI")
+        """
+        if facet in {"profile", "timeline"} and not key:
+            key = None  # Whole-facet summary
+        if manual and not facet and not key:
             latest_summary = self.workspace.get_latest_lifelong_summary()
             if not latest_summary:
                 bootstrap_since = self._get_bootstrap_start_date()
                 if bootstrap_since:
                     return self.bootstrap_lifelong(since=bootstrap_since)
-        latest = self.workspace.get_latest_lifelong_summary(facet=facet, topic=topic)
+        latest = self.workspace.get_latest_lifelong_summary(facet=facet, key=key)
         latest_dt = None
         if latest:
             try:
@@ -281,7 +288,7 @@ class Orchestrator:
         references = [m.metadata.get("chunk_id") for m in recent_messages if m.metadata.get("chunk_id")]
         payload = {
             "facet": facet,
-            "topic": topic,
+            "key": key,
             "trigger": "manual" if manual else "scheduled",
             "prompt_version": LIFELONG_SUMMARY_PROMPT_VERSION,
             "facets": {"profile": [], "topics": [], "timeline": []},
@@ -319,7 +326,7 @@ class Orchestrator:
         if payload_delta:
             payload = {**payload, **payload_delta}
             payload["facet"] = facet
-            payload["topic"] = topic
+            payload["key"] = key
             payload["trigger"] = "manual" if manual else "scheduled"
             payload["prompt_version"] = LIFELONG_SUMMARY_PROMPT_VERSION
             payload["references"] = merge_references(
@@ -346,7 +353,7 @@ class Orchestrator:
             summary_date=datetime.now(UTC),
             summary_source="system",
             facet=facet,
-            topic=topic,
+            key=key,
         )
         if result and result.get("document_id"):
             return Message(
@@ -395,7 +402,7 @@ class Orchestrator:
 
             payload = {
                 "facet": request.facet,
-                "topic": None,
+                "key": request.key,
                 "trigger": "bootstrap",
                 "prompt_version": LIFELONG_SUMMARY_PROMPT_VERSION,
                 "facets": {"profile": [], "topics": [], "timeline": []},
@@ -433,6 +440,7 @@ class Orchestrator:
             if payload_delta:
                 payload = {**payload, **payload_delta}
                 payload["facet"] = request.facet
+                payload["key"] = request.key
                 payload["trigger"] = "bootstrap"
                 payload["prompt_version"] = LIFELONG_SUMMARY_PROMPT_VERSION
                 payload["references"] = merge_references(
@@ -463,9 +471,10 @@ class Orchestrator:
                 summary_date=datetime.now(UTC),
                 summary_source="system",
                 facet=request.facet,
-                topic=None,
+                key=request.key,
                 tags={
                     "facet": request.facet,
+                    "key": request.key,
                     "bootstrap_batch": request.batch_label,
                     "bootstrap_since": batch_start.date().isoformat(),
                     "bootstrap_until": batch_end.date().isoformat(),

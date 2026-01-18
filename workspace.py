@@ -69,7 +69,7 @@ class MemoryWorkspace:
         title: Optional[str] = None,
         summary_source: str = "system",
         facet: Optional[str] = None,
-        topic: Optional[str] = None,
+        key: Optional[str] = None,
         tags: Optional[dict] = None,
     ) -> Optional[dict]:
         summary: LifelongSummary = build_lifelong_summary(
@@ -79,7 +79,7 @@ class MemoryWorkspace:
             title=title,
             summary_source=summary_source,
             facet=facet,
-            topic=topic,
+            key=key,
             tags=tags,
         )
         content = summary.render_document()
@@ -95,19 +95,19 @@ class MemoryWorkspace:
         self,
         limit: int = 20,
         facet: Optional[str] = None,
-        topic: Optional[str] = None,
+        key: Optional[str] = None,
     ) -> List[dict]:
         if self.store:
-            return self.store.list_lifelong_summaries(limit=limit, facet=facet, topic=topic)
+            return self.store.list_lifelong_summaries(limit=limit, facet=facet, key=key)
         return []
 
     def get_latest_lifelong_summary(
         self,
         facet: Optional[str] = None,
-        topic: Optional[str] = None,
+        key: Optional[str] = None,
     ) -> Optional[dict]:
         if self.store:
-            return self.store.get_latest_lifelong_summary(facet=facet, topic=topic)
+            return self.store.get_latest_lifelong_summary(facet=facet, key=key)
         return None
 
     def list_messages_since(self, since: datetime, limit: int = 200) -> List[Message]:

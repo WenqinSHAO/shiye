@@ -16,6 +16,16 @@ class LifelongSummary:
     """Representation of a lifelong summary document.
 
     Stores a JSON payload for tool usage and a Markdown body for user-facing views.
+    
+    The (facet, key) pair uniquely identifies a summary within a time scope:
+    - facet: The top-level category ("profile", "topics", "timeline")
+    - key: Sub-identifier within the facet (e.g., "interests", "AI", "profile:interests")
+    
+    Examples:
+    - (profile, interests): User interests summary
+    - (profile, objectives): User objectives summary
+    - (topics, AI): Summary for AI topic
+    - (timeline, profile:interests): Timeline tracking profile.interests changes
     """
 
     payload: Dict[str, Any]
@@ -24,7 +34,7 @@ class LifelongSummary:
     title: Optional[str] = None
     summary_source: str = DEFAULT_SUMMARY_SOURCE
     facet: Optional[str] = None
-    topic: Optional[str] = None
+    key: Optional[str] = None  # Sub-identifier within facet (renamed from 'topic')
     uri: Optional[str] = None
     tags: Optional[Dict[str, Any]] = None
 
@@ -35,8 +45,8 @@ class LifelongSummary:
         payload.setdefault("summary_date", self.summary_date.date().isoformat())
         if self.facet:
             payload.setdefault("facet", self.facet)
-        if self.topic:
-            payload.setdefault("topic", self.topic)
+        if self.key:
+            payload.setdefault("key", self.key)
         payload.setdefault("facets", {"profile": [], "topics": [], "timeline": []})
         payload.setdefault("references", [])
         return payload
@@ -45,7 +55,7 @@ class LifelongSummary:
         payload = self.normalized_payload()
         json_block = json.dumps(payload, ensure_ascii=False, indent=2)
         markdown = (self.markdown or "").strip()
-        header = self.title or _build_default_title(payload.get("summary_date"), self.facet, self.topic)
+        header = self.title or _build_default_title(payload.get("summary_date"), self.facet, self.key)
         parts = [f"# {header}", "", "```json", json_block, "```", ""]
         if markdown:
             parts.append(markdown)
@@ -56,12 +66,12 @@ class LifelongSummary:
         tags = dict(self.tags or {})
         if self.facet:
             tags.setdefault("facet", self.facet)
-        if self.topic:
-            tags.setdefault("topic", self.topic)
+        if self.key:
+            tags.setdefault("key", self.key)
         tags.setdefault("summary_source", self.summary_source)
         return {
             "doc_type": SUMMARY_DOC_TYPE,
-            "title": self.title or _build_default_title(now.date().isoformat(), self.facet, self.topic),
+            "title": self.title or _build_default_title(now.date().isoformat(), self.facet, self.key),
             "source": self.summary_source,
             "uri": self.uri,
             "tags": tags or None,
@@ -77,7 +87,7 @@ def build_lifelong_summary(
     title: Optional[str] = None,
     summary_source: str = DEFAULT_SUMMARY_SOURCE,
     facet: Optional[str] = None,
-    topic: Optional[str] = None,
+    key: Optional[str] = None,
     uri: Optional[str] = None,
     tags: Optional[Dict[str, Any]] = None,
 ) -> LifelongSummary:
@@ -88,7 +98,7 @@ def build_lifelong_summary(
         title=title,
         summary_source=summary_source,
         facet=facet,
-        topic=topic,
+        key=key,
         uri=uri,
         tags=tags,
     )
@@ -194,13 +204,20 @@ def _render_timeline(items: Iterable[Any]) -> list[str]:
 def _build_default_title(
     summary_date: Optional[str],
     facet: Optional[str],
-    topic: Optional[str],
+    key: Optional[str],
 ) -> str:
+    """Build a default title from facet and key.
+    
+    Examples:
+    - facet=profile, key=interests → "profile · interests (2024-01-01)"
+    - facet=topics, key=AI → "topics · AI (2024-01-01)"
+    - facet=timeline, key=profile:interests → "timeline · profile:interests (2024-01-01)"
+    """
     date_label = summary_date or datetime.now(UTC).date().isoformat()
-    if facet and topic:
-        return f"{facet} · {topic} ({date_label})"
+    if facet and key:
+        return f"{facet} · {key} ({date_label})"
     if facet:
         return f"{facet} Summary ({date_label})"
-    if topic:
-        return f"{topic} Summary ({date_label})"
+    if key:
+        return f"{key} Summary ({date_label})"
     return f"Summary ({date_label})"

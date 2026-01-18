@@ -92,16 +92,16 @@ class TestLifelongSummary:
         assert normalized["schema_version"] == "custom"
         assert normalized["facets"]["profile"] == ["interest1"]
 
-    def test_normalized_payload_includes_facet_and_topic(self):
+    def test_normalized_payload_includes_facet_and_key(self):
         from lifelong_summary import LifelongSummary
 
         summary = LifelongSummary(
-            payload={}, markdown="test", facet="profile", topic="AI"
+            payload={}, markdown="test", facet="profile", key="interests"
         )
         normalized = summary.normalized_payload()
 
         assert normalized["facet"] == "profile"
-        assert normalized["topic"] == "AI"
+        assert normalized["key"] == "interests"
 
     def test_render_document_produces_markdown(self):
         from lifelong_summary import LifelongSummary
@@ -184,7 +184,7 @@ class TestLifelongSummary:
         from lifelong_summary import _build_default_title
 
         assert "profile" in _build_default_title("2024-01-01", "profile", None).lower()
-        assert "topic" in _build_default_title("2024-01-01", "topics", "AI").lower()
+        assert "ai" in _build_default_title("2024-01-01", "topics", "AI").lower()
         assert "summary" in _build_default_title("2024-01-01", None, None).lower()
 
 
@@ -247,22 +247,22 @@ class TestSummaryPlanner:
         planner = SummaryPlanner()
         since = datetime(2024, 1, 15, tzinfo=UTC)
 
-        requests = planner.plan_delta(facet="profile", topic=None, since=since)
+        requests = planner.plan_delta(facet="profile", key=None, since=since)
 
         assert len(requests) == 1
         assert requests[0].facet == "profile"
         assert requests[0].is_delta is True
         assert requests[0].since == since
 
-    def test_plan_delta_with_topic(self):
+    def test_plan_delta_with_key(self):
         from summary_planner import SummaryPlanner
 
         planner = SummaryPlanner()
 
-        requests = planner.plan_delta(facet="topics", topic="AI", since=None)
+        requests = planner.plan_delta(facet="topics", key="AI", since=None)
 
         assert len(requests) == 1
-        assert requests[0].topic == "AI"
+        assert requests[0].key == "AI"
         assert requests[0].is_delta is False  # No since means full snapshot
 
     def test_plan_bootstrap_groups_by_time_window_for_kv_cache(self):
