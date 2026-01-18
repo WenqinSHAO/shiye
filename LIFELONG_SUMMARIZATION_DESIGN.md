@@ -420,9 +420,16 @@ facet: timeline
 **What user meant:** LLM API KV cache optimization
 
 **LLM API KV Cache Mechanics:**
-- Providers like Anthropic/DeepSeek cache the KV tensors for prompt prefixes
-- Sequential API calls with identical prefixes hit the cache, reducing compute
-- **Key insight:** Maximize the shared prefix length across consecutive calls
+
+KV cache refers to the key-value attention cache in transformer models. When an LLM
+processes a prompt, it computes attention key-value pairs for each token. Providers
+like Anthropic and DeepSeek allow caching these KV tensors across API calls when
+requests share identical prefixes:
+
+- Sequential API calls with identical prefixes can reuse cached KV tensors
+- This reduces compute time (lower latency) but **does not reduce token billing**
+  on most providers—you still pay per input/output token
+- **Key insight:** The optimization is about compute/latency, not cost per se
 
 **Current Implementation Gap:**
 ```python
@@ -554,12 +561,17 @@ bootstrap_lifelong()
 
 ### Metrics to Track
 
-| Metric | Current | Target |
-|--------|---------|--------|
-| LLM calls per bootstrap batch | 3 (one per facet) | 3 (unchanged, but cheaper) |
-| KV cache hit rate (estimate) | 0% | ~70-90% prefix reuse |
-| Token cost per facet | 100% | ~60% (prefix cached) |
-| Query complexity for sub-facets | N/A (not supported) | O(1) with (facet, key) index |
+| Metric | Current | Target | Notes |
+|--------|---------|--------|-------|
+| LLM calls per bootstrap batch | 3 (one per facet) | 3 (unchanged) | Number unchanged; latency may improve |
+| KV cache prefix reuse | 0% | Theoretical max: ~80-95% | Assumes document content >> instruction length |
+| Latency per facet | Baseline | Potentially lower | Depends on provider's cache implementation |
+| Query complexity for sub-facets | N/A (not supported) | O(1) | With (facet, key) index |
+
+**Note on cost:** Most LLM providers (including Anthropic, OpenAI) bill per token regardless
+of KV cache hits. The primary benefit is reduced latency, not reduced token cost. Some
+providers (e.g., DeepSeek) offer explicit prompt caching with billing discounts—check
+provider documentation for specific economics.
 
 ---
 
