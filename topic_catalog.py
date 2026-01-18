@@ -162,10 +162,6 @@ class TopicChangeResult:
     rename_from: Optional[str] = None
 
 
-# Keep NoveltyResult as alias for backward compatibility
-NoveltyResult = TopicChangeResult
-
-
 class TopicCatalog:
     """Manager for topic catalog persistence and retrieval.
     
@@ -624,7 +620,3 @@ class TopicChangeDetector:
         
         # Fallback
         return f"Topic_{datetime.now(UTC).strftime('%Y%m%d_%H%M')}"
-
-
-# Keep NoveltyDetector as alias for backward compatibility
-NoveltyDetector = TopicChangeDetector

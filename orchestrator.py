@@ -718,11 +718,6 @@ class Orchestrator:
             )
         return self._topic_change_detector
 
-    # Backward compatibility alias
-    def _get_novelty_detector(self):
-        """Get or create novelty detector instance (alias for _get_topic_change_detector)."""
-        return self._get_topic_change_detector()
-
     def list_topics(self, status: Optional[str] = None) -> List[dict]:
         """List all topics in the catalog.
         

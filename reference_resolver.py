@@ -158,7 +158,7 @@ class ReferenceResolver:
         self,
         document_id: int,
         include_chunks: bool = False,
-        max_chunks: int = 5,
+        max_chunks: int = 5,  # Reserved for future: limit chunks when include_chunks=True
     ) -> ResolvedReference:
         """Resolve a document reference by ID.
         
