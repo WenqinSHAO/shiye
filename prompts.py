@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 
-LIFELONG_SUMMARY_PROMPT_VERSION = "v0.9"
+LIFELONG_SUMMARY_PROMPT_VERSION = "v0.10"
 
 
 def lifelong_summary_instruction(*, facet: Optional[str], is_delta: bool) -> str:
@@ -26,10 +26,27 @@ def lifelong_summary_instruction(*, facet: Optional[str], is_delta: bool) -> str
         )
     if facet == "profile":
         base += " Focus on user interests/objectives; ignore topic details."
-    elif facet == "timeline":
-        base += " Focus on chronological changes derived from profile/topics."
     elif facet == "topics":
         base += " Focus on topic-level updates and emerging themes."
+    return base
+
+
+def timeline_summary_instruction(*, is_delta: bool) -> str:
+    """Return the prompt for timeline summarization with explicit structure."""
+    base = (
+        "Summarize changes into a timeline derived from profile/topics. "
+        "Return JSON only with keys: facets.timeline, plus optional notes. "
+        "facets.timeline must be a list of objects with:\n"
+        "- date: YYYY-MM-DD (use best available date; may repeat)\n"
+        "- event: concise description of the change\n"
+        "- sources: list of strings referencing relevant facet:key (e.g., 'profile:interests', 'topics:AI')\n"
+        "- confidence: one of 'high' | 'medium' | 'low'\n"
+        "Keep items chronological and suitable for visualization."
+    )
+    if is_delta:
+        base = "Summarize only deltas/new changes since previous_summary. " + base
+    else:
+        base = "Produce a full snapshot when previous_summary is empty. " + base
     return base
 
 

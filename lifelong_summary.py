@@ -2,13 +2,33 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Optional, TypedDict, TypeAlias, Literal
 import json
 
 SUMMARY_DOC_TYPE = "lifelong_summary"
 SUMMARY_SCHEMA_VERSION = "v0.9"
 DEFAULT_LANGUAGE = "zh"
 DEFAULT_SUMMARY_SOURCE = "system"
+
+ProfileSummaryItem: TypeAlias = str
+
+
+class TopicSummaryItem(TypedDict):
+    name: str
+    summary: str
+
+
+class TimelineSummaryItem(TypedDict):
+    date: str
+    event: str
+    sources: list[str]
+    confidence: Literal["high", "medium", "low"]
+
+
+class LifelongSummaryFacets(TypedDict):
+    profile: list[ProfileSummaryItem]
+    topics: list[TopicSummaryItem]
+    timeline: list[TimelineSummaryItem]
 
 
 @dataclass

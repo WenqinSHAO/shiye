@@ -1,4 +1,4 @@
-# Lifelong Summarization Implementation (v0.9)
+# Lifelong Summarization Implementation (v0.10)
 
 This document consolidates the **current code-level behavior** for lifelong summarization.
 It is intentionally implementation-focused; planning and roadmap details live in
@@ -35,7 +35,7 @@ class LifelongSummary:
     "timeline": [{"date": "2024-01-01", "event": "..."}]
   },
   "references": [{"document_id": 123}],
-  "prompt_version": "v0.9",
+  "prompt_version": "v0.10",
   "trigger": "bootstrap"
 }
 ```
@@ -66,8 +66,9 @@ class SummaryRequest:
 2. Check cadence unless manual trigger.
 3. Gather recent messages since last summary.
 4. Build payload scaffold with references.
-5. Call LLM summarizer if configured.
-6. Merge payload deltas, render markdown, and save document.
+5. (Optional) Prepend topic→document affinity context using hybrid search.
+6. Call LLM summarizer if configured.
+7. Merge payload deltas, render markdown, and save document.
 
 ## Bootstrap workflow
 1. `SummaryPlanner.plan_bootstrap()` creates requests grouped by time windows.
@@ -89,15 +90,98 @@ This avoids re-fetching document content when multiple facets share a window.
 The `lifelong_summary_instruction(facet, is_delta)` function customizes prompts per facet:
 - `profile`: interests/objectives focus
 - `topics`: topic-level updates
-- `timeline`: chronological changes
+- `timeline`: handled by dedicated timeline prompt (see below)
 
 Delta mode prepends: "Summarize only deltas/new changes since previous_summary"
 Snapshot mode prepends: "Produce a full snapshot when previous_summary is empty"
+
+> Note: Any summary payload that needs structured fields should be enforced explicitly
+> in its prompt and documented here (timeline is the first example).
+
+### Timeline prompt structure (v0.10)
+Timeline summaries use a dedicated prompt (`timeline_summary_instruction`) that enforces
+structured output for visualization:
+```json
+{
+  "facets": {
+    "timeline": [
+      {
+        "date": "YYYY-MM-DD",
+        "event": "concise change",
+        "sources": ["profile:interests", "topics:AI"],
+        "confidence": "high"
+      }
+    ]
+  }
+}
+```
+
+### Topic affinity context (delta summaries)
+Delta summaries optionally prepend a lightweight affinity matrix that relates topic summaries
+to recent documents using hybrid search. This provides LLM judges with additional signals
+without replacing the normal document context.
 
 ## Reference handling
 - **Bootstrap** references use `document_id` because bootstrap operates on raw content.
 - **Regular summarization** references may include `chunk_id` from recent messages.
 - `merge_references()` de-duplicates by JSON content.
+
+## LLM response payload structures (summary types)
+All summarization calls expect JSON only (`payload_json`) and must return the following
+structures. When a facet is not being summarized, its list can be empty.
+
+These structures are declared in code for reference:
+- `ProfileSummaryItem` (alias of `str`)
+- `TopicSummaryItem` (`{name, summary}`)
+- `TimelineSummaryItem` (`{date, event, sources, confidence}`)
+See `lifelong_summary.py` for type definitions.
+
+### Profile summary payload
+```json
+{
+  "facets": {
+    "profile": [
+      "concise bullet about interests/objectives"
+    ],
+    "topics": [],
+    "timeline": []
+  }
+}
+```
+
+### Topics summary payload
+```json
+{
+  "facets": {
+    "profile": [],
+    "topics": [
+      {
+        "name": "Topic name",
+        "summary": "Concise topic update"
+      }
+    ],
+    "timeline": []
+  }
+}
+```
+
+### Timeline summary payload (v0.10)
+```json
+{
+  "facets": {
+    "profile": [],
+    "topics": [],
+    "timeline": [
+      {
+        "date": "YYYY-MM-DD",
+        "event": "Concise change description",
+        "sources": ["profile:interests", "topics:AI"],
+        "confidence": "high"
+      }
+    ]
+  }
+}
+```
 
 ## Test coverage
 Test file: `tests/test_lifelong_summary.py` (Phase 1–2 coverage)

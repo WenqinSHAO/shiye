@@ -6,8 +6,18 @@ import textwrap
 from datetime import UTC, datetime, timedelta
 from workspace import MemoryWorkspace
 from datatypes import Message, Role, ensure_utc
-from lifelong_summary import ensure_reference_ids, merge_references, render_markdown_from_payload
-from prompts import LIFELONG_SUMMARY_PROMPT_VERSION, lifelong_summary_instruction, rss_summary_instruction
+from lifelong_summary import (
+    LifelongSummaryFacets,
+    ensure_reference_ids,
+    merge_references,
+    render_markdown_from_payload,
+)
+from prompts import (
+    LIFELONG_SUMMARY_PROMPT_VERSION,
+    lifelong_summary_instruction,
+    rss_summary_instruction,
+    timeline_summary_instruction,
+)
 from summary_planner import SummaryPlanner
 from config import SHIYE_SUMMARY_CADENCE_DAYS, SHIYE_SUMMARY_MAX_MESSAGES
 import dspy
@@ -56,7 +66,12 @@ class LifelongSummarySignature(dspy.Signature):
     instruction: str = dspy.InputField()
     recent_messages: str = dspy.InputField(desc="Recent messages to summarize")
     previous_summary: str = dspy.InputField(desc="Previous summary text or empty")
-    payload_json: str = dspy.OutputField(desc="JSON payload with facets/topics/references")
+    payload_json: str = dspy.OutputField(
+        desc=(
+            f"JSON payload matching {LifelongSummaryFacets.__name__} "
+            "(facets/topics/timeline/references)"
+        )
+    )
 
 
 class Orchestrator:
@@ -295,6 +310,9 @@ class Orchestrator:
         }
 
         recent_text = "\n".join(m.to_text() for m in recent_messages if m.content)
+        affinity_context = self._build_topic_affinity_context(since_dt)
+        if affinity_context:
+            recent_text = f"{affinity_context}\n\n{recent_text}".strip()
         previous_summary_text = ""
         if latest and latest.get("id"):
             try:
@@ -306,10 +324,13 @@ class Orchestrator:
         payload_delta = {}
         if self.dspy_summarizer:
             try:
-                instruction = lifelong_summary_instruction(
-                    facet=facet,
-                    is_delta=bool(previous_summary_text),
-                )
+                if facet == "timeline":
+                    instruction = timeline_summary_instruction(is_delta=bool(previous_summary_text))
+                else:
+                    instruction = lifelong_summary_instruction(
+                        facet=facet,
+                        is_delta=bool(previous_summary_text),
+                    )
                 out = self.dspy_summarizer(
                     instruction=instruction,
                     recent_messages=recent_text,
@@ -421,10 +442,13 @@ class Orchestrator:
                     # [document_content] + [facet_instruction]
                     # This allows the LLM provider to cache the document prefix across
                     # facet passes for the same time window.
-                    instruction = lifelong_summary_instruction(
-                        facet=request.facet,
-                        is_delta=False,
-                    )
+                    if request.facet == "timeline":
+                        instruction = timeline_summary_instruction(is_delta=False)
+                    else:
+                        instruction = lifelong_summary_instruction(
+                            facet=request.facet,
+                            is_delta=False,
+                        )
                     # Build document-first prompt: documents as prefix, instruction as suffix
                     document_prefix = f"{prefix}\n\n{recent_text}".strip()
                     out = self.dspy_summarizer(
@@ -563,6 +587,56 @@ class Orchestrator:
             f"Window: {batch_start.date().isoformat()} to {batch_end.date().isoformat()}.\n"
             f"Document count: {doc_count}."
         )
+
+    def _build_topic_affinity_context(
+        self,
+        since_dt: datetime,
+        *,
+        max_topics: int = 8,
+        top_k: int = 3,
+    ) -> str:
+        """Build an affinity matrix between topic summaries and recent documents."""
+        if not self.workspace.store:
+            return ""
+        try:
+            catalog = self._get_topic_catalog()
+        except Exception:
+            return ""
+        topics = catalog.list_topics(status="active")
+        if not topics:
+            return ""
+        from retrieval import SearchRequest
+
+        lines = ["[affinity_matrix] Topic summary → recent documents"]
+        for topic in topics[:max_topics]:
+            query = (topic.summary or topic.name or "").strip()
+            if not query:
+                continue
+            request = SearchRequest(
+                query=query,
+                top_k=top_k,
+                enable_rerank=False,
+                enable_time_boost=False,
+                enable_exact_boost=False,
+                filters={
+                    "after": since_dt.isoformat(),
+                    "time_field": "created_at",
+                },
+            )
+            hits = self.workspace.search(request)
+            if not hits:
+                continue
+            lines.append(f"- {topic.name}")
+            for hit in hits:
+                score = hit.scores.get("final") or hit.scores.get("rerank") or 0.0
+                title = hit.doc_title or hit.doc_source or f"doc:{hit.doc_id}"
+                preview = (hit.text or "").replace("\n", " ").strip()[:140]
+                lines.append(
+                    f"  - {title} | score={score:.3f} | {preview}"
+                )
+        if len(lines) == 1:
+            return ""
+        return "\n".join(lines)
 
     # --- Phase 3: Topic catalog methods ---
 
