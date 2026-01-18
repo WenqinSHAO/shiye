@@ -1,8 +1,38 @@
-# Lifelong Summarization Implementation (v0.10)
+# Lifelong Summarization Implementation (v0.11)
 
 This document consolidates the **current code-level behavior** for lifelong summarization.
 It is intentionally implementation-focused; planning and roadmap details live in
 `LIFELONG_SUMMARIZATION_DESIGN.md`.
+
+---
+
+## Phase 3 Code Review Summary (2026-01-18)
+
+### What was reviewed
+- Data structures in `topic_catalog.py` and `lifelong_summary.py`
+- DSPy programming patterns in `orchestrator.py`
+- Prompt design in `prompts.py`
+- Test coverage (56 tests total for Phase 1-3)
+
+### Key findings: ✅ Well implemented
+1. **Data structures are explicit and clear**: `TopicEntry`, `TopicAssignment`, `TopicChangeResult`, 
+   `LifelongSummaryFacets` with proper TypedDict and type hints
+2. **DSPy patterns respected**: Signatures reference typed structures in output descriptions
+3. **Logic is clean**: Hybrid novelty detection (embedding + LLM), unified topic operations, 
+   KV-cache-friendly batching
+
+### Refactoring completed
+1. Removed unused cache variables (`_cache`, `_cache_valid`) from `TopicCatalog`
+2. Moved `topic_change_instruction` import to module level in `topic_catalog.py`
+3. Enhanced docstrings for `TopicChangeResult` to explain all operation types
+4. Updated module docstrings to reference Option B design decision
+
+### Ready for Phase 4 & 5
+The codebase is clean and ready for:
+- **Phase 4**: Reference resolver subsystem (chunk/document resolution, preview cards)
+- **Phase 5**: UI reference peek (summary reference chips, source view)
+
+---
 
 ## Core data structures
 
