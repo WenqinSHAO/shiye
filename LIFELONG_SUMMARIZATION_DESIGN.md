@@ -379,6 +379,190 @@ Test file: `tests/test_lifelong_summary.py` (33 tests)
 
 ---
 
+## Analysis: Data Structure & Token Economy Improvements (v0.9.2)
+
+This section analyzes current limitations and proposes improvements based on code review feedback.
+
+### Current Limitations
+
+#### 1. Inconsistent Facet/Topic Hierarchy
+
+**Current Structure:**
+```python
+facet: str              # "profile", "topics", or "timeline"
+topic: Optional[str]    # Only used when facet="topics"
+```
+
+**Problems:**
+- `topic` is semantically overloaded: it's a sub-key for `facet=topics` but unused for other facets
+- Profile could have sub-facets (interests, objectives, preferences) but can't express them
+- Timeline can't reference which facet/topic it summarizes without string-encoding
+
+**User's Proposed Model:**
+```
+facet: profile
+  ├── topic: interests      → payload: {...}
+  ├── topic: life_objectives → payload: {...}
+  └── topic: food_preferences → payload: {...}
+
+facet: topics
+  ├── topic: AI             → payload: {...}
+  └── topic: distributed_systems → payload: {...}
+
+facet: timeline
+  ├── topic: "profile:interests" → payload: {...}  # timeline for profile.interests
+  └── topic: "topics:AI"         → payload: {...}  # timeline for topics.AI
+```
+
+#### 2. LLM API Prefix Caching vs Code-Level Caching
+
+**What was documented:** Code-level `batch_cache` that reuses document content across facets
+**What user meant:** LLM API KV cache optimization
+
+**LLM API KV Cache Mechanics:**
+- Providers like Anthropic/DeepSeek cache the KV tensors for prompt prefixes
+- Sequential API calls with identical prefixes hit the cache, reducing compute
+- **Key insight:** Maximize the shared prefix length across consecutive calls
+
+**Current Implementation Gap:**
+```python
+# Current: instruction varies per facet, document content is identical
+call_1: [PROFILE_INSTRUCTION] + [DOCUMENT_CONTENT]   # Cache: [PROF..][DOC..]
+call_2: [TOPICS_INSTRUCTION]  + [DOCUMENT_CONTENT]   # Cache miss: [TOP..] differs
+call_3: [TIMELINE_INSTRUCTION]+ [DOCUMENT_CONTENT]   # Cache miss: [TIME..] differs
+```
+
+**Optimal for KV cache:**
+```python
+# Restructure: common prefix first, facet-specific instruction last
+call_1: [DOCUMENT_CONTENT] + [PROFILE_INSTRUCTION]   # Cache: [DOC..][PROF..]
+call_2: [DOCUMENT_CONTENT] + [TOPICS_INSTRUCTION]    # Cache hit: [DOC..] reused
+call_3: [DOCUMENT_CONTENT] + [TIMELINE_INSTRUCTION]  # Cache hit: [DOC..] reused
+```
+
+### Proposed Improvements
+
+#### Improvement 1: Unified Key-Value Facet Model
+
+**New Data Structure:**
+```python
+@dataclass
+class SummaryKey:
+    facet: str              # "profile", "topics", "timeline"
+    key: str                # Sub-key within facet (e.g., "interests", "AI", "profile:interests")
+    
+@dataclass
+class SummaryEntry:
+    key: SummaryKey
+    payload: Dict[str, Any]
+    markdown: str
+    references: List[Dict]
+    created_at: datetime
+    updated_at: datetime
+```
+
+**Payload Structure Evolution:**
+```json
+{
+  "schema_version": "v1.0",
+  "key": {"facet": "profile", "key": "interests"},
+  "content": {
+    "summary": "User is interested in AI/ML, distributed systems...",
+    "items": ["AI/ML", "distributed systems", "knowledge management"]
+  },
+  "references": [{"document_id": 123}],
+  "lineage": {
+    "parent_key": null,
+    "derived_from": ["chat:doc_45", "note:doc_67"]
+  }
+}
+```
+
+**Benefits:**
+- Consistent addressing: `(facet, key)` works uniformly across all facet types
+- Timeline can reference `("timeline", "profile:interests")` to track evolution
+- Enables hierarchical queries: "all entries under facet=profile"
+
+#### Improvement 2: Prompt Restructuring for KV Cache Optimization
+
+**Current Call Pattern:**
+```
+[facet_instruction] + [documents]  →  No prefix sharing
+```
+
+**Proposed Call Pattern:**
+```
+[system_context] + [documents] + [facet_instruction]
+```
+
+Where `[system_context] + [documents]` is identical across facet passes.
+
+**Implementation:**
+```python
+def _build_llm_prompt(self, documents_text: str, facet: str, is_delta: bool) -> tuple[str, str]:
+    """Returns (prefix, suffix) for LLM call with optimal KV cache utilization."""
+    # Common prefix (cacheable)
+    prefix = (
+        "You are summarizing user activity from the following documents.\n\n"
+        f"--- Documents ---\n{documents_text}\n--- End Documents ---\n\n"
+    )
+    # Facet-specific suffix (varies)
+    suffix = lifelong_summary_instruction(facet=facet, is_delta=is_delta)
+    return prefix, suffix
+```
+
+**Batch Processing Order:**
+- Process all facets for time_window_1 before moving to time_window_2
+- Within a time window, process facets in consistent order
+- This maximizes KV cache hits for the document content prefix
+
+#### Improvement 3: Simplified Orchestration Flow
+
+**Current Flow:**
+```
+bootstrap_lifelong() → SummaryPlanner → batch_cache → N separate LLM calls
+```
+
+**Proposed Flow:**
+```
+bootstrap_lifelong() 
+  → SummaryPlanner.plan_batch_optimized()  # Groups by time window
+    → For each time_window:
+        → Load documents once
+        → Build common prefix
+        → For each facet in [profile, topics, timeline]:
+            → LLM call with common_prefix + facet_suffix  # KV cache hit
+        → Save all summaries with unified key structure
+```
+
+### Migration Path
+
+1. **Phase A: Key Structure Migration (Non-breaking)**
+   - Add `key` field alongside existing `topic` field
+   - Backfill: `topic` → `key` where applicable
+   - New code writes to both fields during transition
+
+2. **Phase B: Prompt Restructuring (Config-driven)**
+   - Add `SHIYE_LLM_PREFIX_OPTIMIZE=true` flag
+   - When enabled, use document-first prompt structure
+   - Measure token cost difference in logs
+
+3. **Phase C: Unified Model (Breaking)**
+   - Remove `topic` field in favor of `key`
+   - Update all queries to use `(facet, key)` addressing
+   - Migration script for existing summaries
+
+### Metrics to Track
+
+| Metric | Current | Target |
+|--------|---------|--------|
+| LLM calls per bootstrap batch | 3 (one per facet) | 3 (unchanged, but cheaper) |
+| KV cache hit rate (estimate) | 0% | ~70-90% prefix reuse |
+| Token cost per facet | 100% | ~60% (prefix cached) |
+| Query complexity for sub-facets | N/A (not supported) | O(1) with (facet, key) index |
+
+---
+
 ### Phase 3: Topic catalog + novelty
 - Create a `topics` table (id, name, summary, last_updated, status).
 - Add a topic assignment step that uses LLM judgment + embeddings,
