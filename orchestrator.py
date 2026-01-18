@@ -411,13 +411,19 @@ class Orchestrator:
             payload_delta = {}
             if self.dspy_summarizer:
                 try:
+                    # Document-first prompt structure for LLM API KV cache optimization:
+                    # [document_content] + [facet_instruction]
+                    # This allows the LLM provider to cache the document prefix across
+                    # facet passes for the same time window.
                     instruction = lifelong_summary_instruction(
                         facet=request.facet,
                         is_delta=False,
                     )
+                    # Build document-first prompt: documents as prefix, instruction as suffix
+                    document_prefix = f"{prefix}\n\n{recent_text}".strip()
                     out = self.dspy_summarizer(
                         instruction=instruction,
-                        recent_messages=f"{prefix}\n\n{recent_text}".strip(),
+                        recent_messages=document_prefix,
                         previous_summary="",
                     )
                     payload_delta = json.loads(out.payload_json or "{}")

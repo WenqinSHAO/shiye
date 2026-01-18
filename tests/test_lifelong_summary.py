@@ -265,6 +265,48 @@ class TestSummaryPlanner:
         assert requests[0].topic == "AI"
         assert requests[0].is_delta is False  # No since means full snapshot
 
+    def test_plan_bootstrap_groups_by_time_window_for_kv_cache(self):
+        """Test that bootstrap requests are grouped by time window first, then by facet.
+        
+        This ordering is critical for LLM API KV cache optimization: all facets for
+        the same time window should be processed together so the document prefix
+        can be reused across facet-specific LLM calls.
+        """
+        from summary_planner import SummaryPlanner
+
+        planner = SummaryPlanner(batch_days=30)
+        since = datetime(2024, 1, 1, tzinfo=UTC)
+
+        with patch("summary_planner.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2024, 3, 15, tzinfo=UTC)  # ~2.5 months
+            mock_dt.side_effect = lambda *args, **kw: datetime(*args, **kw)
+            requests = planner.plan_bootstrap(["profile", "topics", "timeline"], since=since)
+
+        # Should have 3 time windows × 3 facets = 9 requests
+        assert len(requests) == 9
+
+        # Verify ordering: all facets for window 1 come before window 2
+        # Extract (window_start, facet) pairs
+        window_facet_pairs = [(r.since, r.facet) for r in requests]
+
+        # First 3 requests should all be from the first time window
+        first_window = requests[0].since
+        for i in range(3):
+            assert requests[i].since == first_window, f"Request {i} should be from first window"
+
+        # Next 3 requests should all be from the second time window
+        second_window = requests[3].since
+        assert second_window > first_window, "Second window should be after first"
+        for i in range(3, 6):
+            assert requests[i].since == second_window, f"Request {i} should be from second window"
+
+        # Within each window, facets should be in the same order
+        facets_window_1 = [requests[i].facet for i in range(3)]
+        facets_window_2 = [requests[i].facet for i in range(3, 6)]
+        facets_window_3 = [requests[i].facet for i in range(6, 9)]
+        assert facets_window_1 == facets_window_2 == facets_window_3, \
+            "Facet order should be consistent across time windows"
+
 
 # --- Prompts tests ---
 

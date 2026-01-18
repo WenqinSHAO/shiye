@@ -140,6 +140,7 @@
 - ✅ Add a `SummaryPlanner` helper (new module) that:
   - Determines snapshot vs delta per facet/topic.
   - Builds LLM request batches for bootstrap passes.
+  - Groups requests by time window for LLM KV cache optimization.
   - (Follow-up) track prompt versions and attach them to summary metadata.
 
 ### Phase 2: Bootstrap pipeline
@@ -147,78 +148,40 @@
   - Load raw documents by type (chat, note, rss, web, paper).
   - Run profile/topic/timeline passes with batching and cached prefixes.
   - Persist summaries per facet/topic with provenance metadata.
+- ✅ Optimize LLM API calls for KV cache hits:
+  - Document-first prompt structure: `[documents] + [instruction]`
+  - Batch processing ordered by time window, then facet
+  - All facets for same time window processed together
 
 ---
 
-## Phase 1&2 Code Review Findings (v0.9.1)
+## Phase 1&2 Code Review Findings
 
 ### Summary
-Phase 1&2 are largely implemented but have several gaps related to reference granularity,
-test coverage, and documentation. This section documents issues found during code review.
+Phase 1&2 implementation reviewed and improved. Issues addressed include test coverage,
+documentation, and LLM API optimization for KV cache utilization.
 
-### Issues Found
+### Issues Found and Resolutions
 
 #### Issue 1: Bootstrap references use document_id instead of chunk_id
-- **Location**: `orchestrator.py` → `_format_bootstrap_documents()`
-- **Design expectation**: "references should use chunk IDs as the preferred reference unit"
-- **Actual behavior**: Bootstrap populates `{"document_id": doc_id}` references
-- **Impact**: Low - document-level references are acceptable for bootstrap since it
-  operates on raw_content, not chunked text. Design doc also notes document-level
-  is "usually enough for papers/web/GitHub issues/PRs."
-- **Status**: ✅ Acceptable (design doc allows document-level for certain types)
+- **Status**: ✅ Acceptable - document-level references are appropriate for bootstrap since it
+  operates on raw_content, not chunked text. Design doc notes "document-level is usually enough."
 
-#### Issue 2: Missing test coverage for lifelong summary functionality
-- **Location**: `tests/` directory
-- **Design expectation**: Critical functionality should have test coverage
-- **Actual behavior**: No tests for `summarize_lifelong()`, `bootstrap_lifelong()`,
-  `SummaryPlanner`, `LifelongSummary`, or `prompts.py` summarization functions
-- **Impact**: High - regressions may go undetected
-- **Status**: 🔧 Fix required - add comprehensive tests
+#### Issue 2: Missing test coverage
+- **Status**: ✅ Fixed - Added `tests/test_lifelong_summary.py` with 33 tests covering
+  `LifelongSummary`, `SummaryPlanner`, prompts, and orchestrator flows.
 
-#### Issue 3: Prefix caching documentation gap
-- **Location**: Design doc mentions "cached prefixes" but implementation details unclear
-- **Design expectation**: "Bootstrap batches reuse cached prefixes per time window to
-  reduce repeated prompt setup across facets"
-- **Actual behavior**: `batch_cache` in `bootstrap_lifelong()` caches entire document
-  content per time window, not just prefix. The prefix is a simple static header.
-- **Impact**: Medium - documentation should clarify what "prefix reuse" actually does
-- **Status**: 🔧 Update documentation to clarify actual caching strategy
+#### Issue 3: Suboptimal batch ordering for LLM KV cache
+- **Status**: ✅ Fixed - `SummaryPlanner.plan_bootstrap()` now groups requests by time window
+  first, then by facet, maximizing prefix reuse across facet passes.
 
-#### Issue 4: SummaryRequest lacks prompt_version tracking
-- **Location**: `summary_planner.py` → `SummaryRequest` dataclass
-- **Design expectation**: "(Follow-up) track prompt versions and attach them to summary metadata"
-- **Actual behavior**: `SummaryRequest` doesn't include prompt_version; it's added later
-  in `orchestrator.py` during payload construction
-- **Impact**: Low - prompt version is correctly attached to final payload
-- **Status**: ✅ Acceptable - prompt_version properly tracked in payload
-
-#### Issue 5: Documentation doesn't reflect current data structures
-- **Location**: LIFELONG_SUMMARIZATION_DESIGN.md
-- **Design expectation**: Documentation should match implementation
-- **Actual behavior**: Missing documentation of:
-  - Actual `LifelongSummary` dataclass structure
-  - `SummaryRequest` and `SummaryPlanner` API
-  - Exact workflow of `/sum bootstrap` command
-  - How batch caching works in practice
-- **Impact**: Medium - makes maintenance harder
-- **Status**: 🔧 Update documentation
-
-### Fix Plan
-
-1. **Add test coverage** (Issue 2):
-   - ✅ Added `tests/test_lifelong_summary.py` with 33 tests covering:
-     - `LifelongSummary` dataclass methods
-     - `SummaryPlanner.plan_bootstrap()` and `plan_delta()`
-     - `prompts.lifelong_summary_instruction()` variations
-     - `orchestrator.summarize_lifelong()` basic flow
-     - `orchestrator.bootstrap_lifelong()` with mocked LLM
-
-2. **Update documentation** (Issues 3, 5):
-   - ✅ Added "Current Implementation Details" section (see below)
+#### Issue 4: Instruction-first prompt structure misses KV cache
+- **Status**: ✅ Fixed - Implemented document-first prompt structure in `bootstrap_lifelong()`.
+  Documents appear before facet-specific instructions so LLM can cache the shared prefix.
 
 ---
 
-## Current Implementation Details (v0.9.1)
+## Current Implementation Details
 
 This section documents the actual implementation of Phase 1&2 functionality.
 
@@ -379,13 +342,11 @@ Test file: `tests/test_lifelong_summary.py` (33 tests)
 
 ---
 
-## Analysis: Data Structure & Token Economy Improvements (v0.9.2)
+## Future Improvements (Analysis for Post-v0.9)
 
-This section analyzes current limitations and proposes improvements based on code review feedback.
+This section documents potential improvements for future phases based on code review feedback.
 
-### Current Limitations
-
-#### 1. Inconsistent Facet/Topic Hierarchy
+### Improvement 1: Unified Key-Value Facet Model
 
 **Current Structure:**
 ```python
@@ -393,185 +354,43 @@ facet: str              # "profile", "topics", or "timeline"
 topic: Optional[str]    # Only used when facet="topics"
 ```
 
-**Problems:**
-- `topic` is semantically overloaded: it's a sub-key for `facet=topics` but unused for other facets
-- Profile could have sub-facets (interests, objectives, preferences) but can't express them
-- Timeline can't reference which facet/topic it summarizes without string-encoding
+**Limitation:** `topic` is semantically overloaded; profile could have sub-facets (interests,
+objectives) but can't express them. Timeline can't reference which facet/topic it summarizes.
 
-**User's Proposed Model:**
+**Proposed Model:**
 ```
 facet: profile
-  ├── topic: interests      → payload: {...}
-  ├── topic: life_objectives → payload: {...}
-  └── topic: food_preferences → payload: {...}
+  ├── key: interests      → payload: {...}
+  ├── key: life_objectives → payload: {...}
+  └── key: food_preferences → payload: {...}
 
 facet: topics
-  ├── topic: AI             → payload: {...}
-  └── topic: distributed_systems → payload: {...}
+  ├── key: AI             → payload: {...}
+  └── key: distributed_systems → payload: {...}
 
 facet: timeline
-  ├── topic: "profile:interests" → payload: {...}  # timeline for profile.interests
-  └── topic: "topics:AI"         → payload: {...}  # timeline for topics.AI
+  ├── key: "profile:interests" → payload: {...}
+  └── key: "topics:AI"         → payload: {...}
 ```
 
-#### 2. LLM API Prefix Caching vs Code-Level Caching
+**Benefit:** Consistent `(facet, key)` addressing across all facet types.
 
-**What was documented:** Code-level `batch_cache` that reuses document content across facets
-**What user meant:** LLM API KV cache optimization
+### Improvement 2: LLM API KV Cache Optimization ✅ (Implemented)
 
-**LLM API KV Cache Mechanics:**
+**Problem:** Original instruction-first prompts prevented LLM API KV cache hits.
 
-KV cache refers to the key-value attention cache in transformer models. When an LLM
-processes a prompt, it computes attention key-value pairs for each token. Providers
-like Anthropic and DeepSeek allow caching these KV tensors across API calls when
-requests share identical prefixes:
+**Solution implemented:**
+1. `SummaryPlanner.plan_bootstrap()` groups requests by time window, then facet
+2. Document-first prompt structure in `bootstrap_lifelong()`:
+   ```
+   [document_content] + [facet_instruction]
+   ```
+3. All facets for the same time window process sequentially
 
-- Sequential API calls with identical prefixes can reuse cached KV tensors
-- This reduces compute time (lower latency) but **does not reduce token billing**
-  on most providers—you still pay per input/output token
-- **Key insight:** The optimization is about compute/latency, not cost per se
+**Result:** Document prefix is reused across facet passes for each time window.
 
-**Current Implementation Gap:**
-```python
-# Current: instruction varies per facet, document content is identical
-call_1: [PROFILE_INSTRUCTION] + [DOCUMENT_CONTENT]   # Cache: [PROF..][DOC..]
-call_2: [TOPICS_INSTRUCTION]  + [DOCUMENT_CONTENT]   # Cache miss: [TOP..] differs
-call_3: [TIMELINE_INSTRUCTION]+ [DOCUMENT_CONTENT]   # Cache miss: [TIME..] differs
-```
-
-**Optimal for KV cache:**
-```python
-# Restructure: common prefix first, facet-specific instruction last
-call_1: [DOCUMENT_CONTENT] + [PROFILE_INSTRUCTION]   # Cache: [DOC..][PROF..]
-call_2: [DOCUMENT_CONTENT] + [TOPICS_INSTRUCTION]    # Cache hit: [DOC..] reused
-call_3: [DOCUMENT_CONTENT] + [TIMELINE_INSTRUCTION]  # Cache hit: [DOC..] reused
-```
-
-### Proposed Improvements
-
-#### Improvement 1: Unified Key-Value Facet Model
-
-**New Data Structure:**
-```python
-@dataclass
-class SummaryKey:
-    facet: str              # "profile", "topics", "timeline"
-    key: str                # Sub-key within facet (e.g., "interests", "AI", "profile:interests")
-    
-@dataclass
-class SummaryEntry:
-    key: SummaryKey
-    payload: Dict[str, Any]
-    markdown: str
-    references: List[Dict]
-    created_at: datetime
-    updated_at: datetime
-```
-
-**Payload Structure Evolution:**
-```json
-{
-  "schema_version": "v1.0",
-  "key": {"facet": "profile", "key": "interests"},
-  "content": {
-    "summary": "User is interested in AI/ML, distributed systems...",
-    "items": ["AI/ML", "distributed systems", "knowledge management"]
-  },
-  "references": [{"document_id": 123}],
-  "lineage": {
-    "parent_key": null,
-    "derived_from": ["chat:doc_45", "note:doc_67"]
-  }
-}
-```
-
-**Benefits:**
-- Consistent addressing: `(facet, key)` works uniformly across all facet types
-- Timeline can reference `("timeline", "profile:interests")` to track evolution
-- Enables hierarchical queries: "all entries under facet=profile"
-
-#### Improvement 2: Prompt Restructuring for KV Cache Optimization
-
-**Current Call Pattern:**
-```
-[facet_instruction] + [documents]  →  No prefix sharing
-```
-
-**Proposed Call Pattern:**
-```
-[system_context] + [documents] + [facet_instruction]
-```
-
-Where `[system_context] + [documents]` is identical across facet passes.
-
-**Implementation:**
-```python
-def _build_llm_prompt(self, documents_text: str, facet: str, is_delta: bool) -> tuple[str, str]:
-    """Returns (prefix, suffix) for LLM call with optimal KV cache utilization."""
-    # Common prefix (cacheable)
-    prefix = (
-        "You are summarizing user activity from the following documents.\n\n"
-        f"--- Documents ---\n{documents_text}\n--- End Documents ---\n\n"
-    )
-    # Facet-specific suffix (varies)
-    suffix = lifelong_summary_instruction(facet=facet, is_delta=is_delta)
-    return prefix, suffix
-```
-
-**Batch Processing Order:**
-- Process all facets for time_window_1 before moving to time_window_2
-- Within a time window, process facets in consistent order
-- This maximizes KV cache hits for the document content prefix
-
-#### Improvement 3: Simplified Orchestration Flow
-
-**Current Flow:**
-```
-bootstrap_lifelong() → SummaryPlanner → batch_cache → N separate LLM calls
-```
-
-**Proposed Flow:**
-```
-bootstrap_lifelong() 
-  → SummaryPlanner.plan_batch_optimized()  # Groups by time window
-    → For each time_window:
-        → Load documents once
-        → Build common prefix
-        → For each facet in [profile, topics, timeline]:
-            → LLM call with common_prefix + facet_suffix  # KV cache hit
-        → Save all summaries with unified key structure
-```
-
-### Migration Path
-
-1. **Phase A: Key Structure Migration (Non-breaking)**
-   - Add `key` field alongside existing `topic` field
-   - Backfill: `topic` → `key` where applicable
-   - New code writes to both fields during transition
-
-2. **Phase B: Prompt Restructuring (Config-driven)**
-   - Add `SHIYE_LLM_PREFIX_OPTIMIZE=true` flag
-   - When enabled, use document-first prompt structure
-   - Measure token cost difference in logs
-
-3. **Phase C: Unified Model (Breaking)**
-   - Remove `topic` field in favor of `key`
-   - Update all queries to use `(facet, key)` addressing
-   - Migration script for existing summaries
-
-### Metrics to Track
-
-| Metric | Current | Target | Notes |
-|--------|---------|--------|-------|
-| LLM calls per bootstrap batch | 3 (one per facet) | 3 (unchanged) | Number unchanged; latency may improve |
-| KV cache prefix reuse | 0% | Theoretical max: ~80-95% | Assumes document content >> instruction length |
-| Latency per facet | Baseline | Potentially lower | Depends on provider's cache implementation |
-| Query complexity for sub-facets | N/A (not supported) | O(1) | With (facet, key) index |
-
-**Note on cost:** Most LLM providers (including Anthropic, OpenAI) bill per token regardless
-of KV cache hits. The primary benefit is reduced latency, not reduced token cost. Some
-providers (e.g., DeepSeek) offer explicit prompt caching with billing discounts—check
-provider documentation for specific economics.
+**Note on cost:** Most providers bill per token regardless of KV cache—benefit is latency,
+not cost. DeepSeek offers prompt caching with billing discounts.
 
 ---
 
