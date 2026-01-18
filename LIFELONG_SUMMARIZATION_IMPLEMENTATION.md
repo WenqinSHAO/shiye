@@ -106,3 +106,123 @@ Test file: `tests/test_lifelong_summary.py` (Phase 1–2 coverage)
 - `TestPrompts`: facet-specific prompt generation
 - `TestOrchestratorLifelongSummary`: summarize + bootstrap flows, batch caching
 - `TestWorkspaceLifelongSummary`: save/list/get summaries
+
+---
+
+## Phase 3: Topic Catalog & Unified Change Detection
+
+### Core data structures (`topic_catalog.py`)
+
+#### TopicEntry
+```python
+@dataclass
+class TopicEntry:
+    name: str                         # Human-readable topic name (used as key)
+    summary: str                      # Brief description of the topic
+    status: str = "active"            # "active" or "archived"
+    created_at: datetime              # When topic was first created
+    updated_at: datetime              # Last modification time
+    last_activity_at: Optional[datetime]  # Last document assignment time
+    embedding: Optional[np.ndarray]   # Cached embedding vector (optional)
+    document_id: Optional[int]        # ID of backing lifelong_summary document
+    tags: Dict[str, Any]              # Additional metadata
+```
+
+#### TopicAssignment
+```python
+@dataclass
+class TopicAssignment:
+    topic_name: str                   # Which topic the document was assigned to
+    document_id: int                  # The assigned document
+    assigned_at: datetime             # When assignment was made
+    rationale: str                    # Human-readable explanation
+    similarity_score: float           # Embedding similarity score
+    scores: Dict[str, float]          # All candidate scores for transparency
+    decision_method: str              # "embedding", "llm", or "manual"
+```
+
+#### TopicChangeResult (unified)
+```python
+@dataclass
+class TopicChangeResult:
+    decision: str                     # "reuse", "create", "merge", "split", "rename"
+    topic_name: str                   # Primary topic name
+    rationale: str                    # Explanation of decision
+    similarity_scores: Dict[str, float]  # All similarity scores
+    top_candidates: List[Tuple[str, float]]  # Top-k candidates
+    merge_from: Optional[str]         # Source topic for merge
+    split_into: Optional[str]         # New topic for split
+    rename_from: Optional[str]        # Old name for rename
+```
+
+### Topic persistence (document-based, Option B)
+
+Topics are stored as `doc_type='lifelong_summary'` documents with:
+- `facet='topics'` in tags
+- `key=<topic_name>` in tags
+- Topic metadata embedded in JSON payload
+- References to assigned documents
+
+This enables:
+- Full-text search over topic summaries
+- Tag-based filtering (`facet=topics`)
+- Versioned history of topic evolution
+
+### TopicCatalog
+
+Manager class for topic operations:
+- `list_topics(status)`: List all topics, optionally filtered by status
+- `get_topic(name)`: Get a specific topic by name
+- `save_topic(topic, references, assignments)`: Save/update a topic
+- `get_topic_embeddings()`: Compute embeddings for all active topics
+- `archive_topic(name)`: Mark a topic as archived
+
+### TopicChangeDetector (unified)
+
+Unified pipeline for all topic change operations. Handles:
+- **REUSE**: Assign content to an existing topic (high similarity)
+- **CREATE**: Create a new topic for novel content (low similarity)
+- **MERGE**: Combine multiple topics when content bridges them
+- **SPLIT**: Separate a subtopic from an existing topic
+- **RENAME**: Update topic name when content redefines it
+
+Pipeline:
+1. **Embedding prefilter**: Compute similarity between content and all topic embeddings
+2. **Decision logic**:
+   - High similarity (≥ 0.6): Reuse existing topic
+   - Low similarity (< 0.3): Create new topic
+   - Ambiguous: Use LLM judge with unified prompt for all operations
+3. **Output**: `TopicChangeResult` with decision, rationale, and operation-specific fields
+
+Additional methods:
+- `merge_topics(source, target, rationale)`: Explicit topic merge
+- `split_topic(source, new_name, content, rationale)`: Explicit topic split
+
+### Entry points (orchestrator.py)
+
+- `Orchestrator.list_topics(status)`: List topics in catalog
+- `Orchestrator.assign_to_topic(content, document_id, use_llm)`: Main entry point for all topic operations
+- `Orchestrator.process_new_documents_for_topics(since, limit)`: Batch processing
+
+Internal handlers for each operation:
+- `_handle_topic_create()`: Create new topic
+- `_handle_topic_reuse()`: Assign to existing topic
+- `_handle_topic_merge()`: Merge topics (archives source)
+- `_handle_topic_split()`: Split into new topic
+- `_handle_topic_rename()`: Rename topic (archives old)
+
+### Prompts (prompts.py)
+
+- `topic_summary_instruction()`: Generate brief topic overviews
+- `topic_assignment_instruction(candidates)`: Legacy prompt (backward compatibility)
+- `topic_change_instruction(candidates, candidates_with_scores)`: Unified prompt for all operations
+
+### Test coverage
+
+Test file: `tests/test_topic_catalog.py` (Phase 3 coverage, 21 tests)
+- `TestTopicEntry`: Payload conversion and document parsing
+- `TestTopicAssignment`: Score tracking and serialization
+- `TestTopicCatalog`: Save/get/list/archive operations
+- `TestTopicChangeDetector`: Unified detection, merge, split operations
+- `TestOrchestratorTopics`: Integration with orchestrator
+- `TestPhase3Prompts`: Prompt functions including unified prompt

@@ -72,7 +72,15 @@ request planning, prompt structure, and test coverage.
 - Bootstrap pipeline using raw documents and batch caching.
 - KV-cache-friendly prompt ordering for bootstrap.
 
-### Phase 3: Topic catalog + novelty detection
+### Phase 3: Topic catalog + novelty detection (Complete)
+
+#### Phase 3 deliverables
+- **TopicCatalog** class for durable topic persistence using document-based storage (Option B).
+- **NoveltyDetector** with hybrid pipeline: embedding similarity prefilter + optional LLM judge.
+- **TopicEntry** and **TopicAssignment** data structures for transparent rationale tracking.
+- Orchestrator methods: `list_topics()`, `assign_to_topic()`, `process_new_documents_for_topics()`.
+- New prompts: `topic_summary_instruction()`, `topic_assignment_instruction()`.
+- Comprehensive test coverage in `tests/test_topic_catalog.py` (18 tests).
 
 #### Phase 3 goals
 - Establish a durable topic catalog that survives weekly deltas.
