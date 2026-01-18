@@ -41,7 +41,7 @@ class ReferencePreview:
     snippet: str = ""  # First ~200 chars of content
     full_text: Optional[str] = None  # Full chunk text when requested
     char_start: int = 0
-    char_end: int = -1
+    char_end: Optional[int] = None  # None means unset/end of string
     
     # Context info
     heading_path: Optional[str] = None  # Section context

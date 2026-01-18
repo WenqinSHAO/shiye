@@ -160,12 +160,34 @@ request planning, prompt structure, and test coverage.
 - **Consistency policy**: allow auto-renaming with prompt-guided stability and backward references.
 - **Reference granularity**: prefer **document IDs** for references.
 
-### Phase 4: Reference subsystem
-- Introduce a reference resolver that:
-  - Resolves chunk/document references by ID and version.
-  - Generates preview cards (title, date, snippet) for UI reuse.
-  - Supports “missing chunk” fallback to parent documents.
+### Phase 4: Reference subsystem (Complete)
 
-### Phase 5: UI reference peek
-- Add summary reference chips that open the existing search-hit preview panel.
-- Provide a compact “View source” button for document-level references.
+#### Phase 4 deliverables
+- **ReferenceResolver** class (`reference_resolver.py`) for chunk/document reference resolution.
+- **ReferencePreview** and **ResolvedReference** data classes for structured results.
+- Reference resolution by chunk ID or document ID with fallback handling.
+- Preview card generation (title, date, snippet, source) for UI display.
+- API endpoints: `/api/chunks/{id}`, `/api/references/resolve`, `/api/summaries/{id}`, `/api/summaries/{id}/debug`.
+- Comprehensive test coverage in `tests/test_reference_resolver.py` (14 tests).
+
+### Phase 5: UI reference peek (Complete)
+
+#### Phase 5 deliverables
+- `/list <id>` command to view specific summaries with resolved references.
+- Reference chips with "View source" buttons rendered inline.
+- `peekReference(docId, chunkId)` JavaScript function for modal preview.
+- Reference preview modal with document/chunk context display.
+- CSS styling for reference preview components.
+
+### Phase 4+5 additional: Debug tools for summarization (Complete)
+
+#### Debug tools deliverables
+- `/sum debug` command to display last summary debug trace.
+- `orchestrator.last_summary_trace` tracks debug info during summarization.
+- Debug output includes:
+  - Documents included in summary (chunk IDs, doc types, content previews).
+  - Affinity matrix calculation context.
+  - LLM API call contexts (instruction, input lengths).
+  - LLM API responses (parsed payloads, errors).
+  - Summary result metadata.
+- HTML-formatted debug panels for web UI display.

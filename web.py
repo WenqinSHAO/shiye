@@ -1,6 +1,7 @@
 from typing import List
 from pathlib import Path
 import secrets
+import html
 
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile, Request
 from fastapi.responses import HTMLResponse
@@ -1979,10 +1980,10 @@ def index() -> HTMLResponse:
                         // Document info
                         if (docInfo.doc_type || docInfo.source) {
                             html += '<div style="margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border);">';
-                            html += `<div class="note-subtle">Type: ${docInfo.doc_type || 'unknown'}</div>`;
+                            html += `<div class="note-subtle">Type: ${escapeHtml(docInfo.doc_type || 'unknown')}</div>`;
                             if (docInfo.uri || docInfo.source) {
                                 const source = docInfo.uri || docInfo.source;
-                                html += `<div class="note-subtle">Source: <a href="${source}" target="_blank">${source}</a></div>`;
+                                html += `<div class="note-subtle">Source: <a href="${encodeURI(source)}" target="_blank">${escapeHtml(source)}</a></div>`;
                             }
                             html += '</div>';
                         }
@@ -1997,12 +1998,12 @@ def index() -> HTMLResponse:
                         titleEl.textContent = doc.title || `Document #${docId}`;
                         
                         let html = '';
-                        html += `<div class="note-subtle">Type: ${doc.doc_type || 'unknown'}</div>`;
+                        html += `<div class="note-subtle">Type: ${escapeHtml(doc.doc_type || 'unknown')}</div>`;
                         if (doc.uri || doc.source) {
                             const source = doc.uri || doc.source;
-                            html += `<div class="note-subtle">Source: <a href="${source}" target="_blank">${source}</a></div>`;
+                            html += `<div class="note-subtle">Source: <a href="${encodeURI(source)}" target="_blank">${escapeHtml(source)}</a></div>`;
                         }
-                        html += `<div class="note-subtle">Created: ${doc.created_at || 'unknown'}</div>`;
+                        html += `<div class="note-subtle">Created: ${escapeHtml(doc.created_at || 'unknown')}</div>`;
                         
                         // Show content with chunk highlighting if available
                         const content = doc.content || '';
@@ -2433,29 +2434,30 @@ def chat(payload=Body(...)) -> dict:
                                         if preview.resolved:
                                             ref_type = "chunk" if preview.chunk_id else "document"
                                             ref_id = preview.chunk_id or preview.document_id
-                                            title = preview.title or "Untitled"
-                                            doc_type = preview.doc_type or "unknown"
-                                            snippet = preview.snippet[:100] + "..." if len(preview.snippet) > 100 else preview.snippet
+                                            title = html.escape(preview.title or "Untitled")
+                                            doc_type = html.escape(preview.doc_type or "unknown")
+                                            snippet_text = preview.snippet[:100] + "..." if len(preview.snippet) > 100 else preview.snippet
+                                            snippet = html.escape(snippet_text)
                                             
                                             parts.append(f"""
                                             <div class='search-hit' style='margin-bottom: 8px; padding: 8px;' 
-                                                 data-ref-type='{ref_type}' data-ref-id='{ref_id}'
+                                                 data-ref-type='{html.escape(ref_type)}' data-ref-id='{ref_id}'
                                                  data-doc-id='{preview.document_id or ""}'>
                                                 <div class='hit-header'>
                                                     <span class='hit-type'>{doc_type}</span>
-                                                    <span class='hit-date'>{ref_type} #{ref_id}</span>
+                                                    <span class='hit-date'>{html.escape(ref_type)} #{ref_id}</span>
                                                 </div>
                                                 <div class='hit-title'>{title}</div>
                                                 <div class='hit-text' style='font-size: 12px;'>{snippet}</div>
                                                 <button class='hit-toggle-btn ref-peek-btn' 
-                                                        onclick='peekReference({preview.document_id or 0}, {preview.chunk_id or 0})'
+                                                        onclick='peekReference({int(preview.document_id or 0)}, {int(preview.chunk_id or 0)})'
                                                         type='button'>View source</button>
                                             </div>
                                             """)
                                         else:
                                             raw_ref = ref_result.raw_reference
-                                            error = preview.error or "Not found"
-                                            parts.append(f"<div class='debug-item' style='color: #999;'>⚠ Ref {raw_ref}: {error}</div>")
+                                            error = html.escape(preview.error or "Not found")
+                                            parts.append(f"<div class='debug-item' style='color: #999;'>⚠ Ref {html.escape(str(raw_ref))}: {error}</div>")
                                     
                                     if len(references) > 20:
                                         parts.append(f"<div class='debug-item'>... and {len(references) - 20} more references</div>")
