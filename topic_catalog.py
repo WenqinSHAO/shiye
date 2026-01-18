@@ -3,9 +3,14 @@
 This module implements:
 - TopicEntry: Data structure for topic catalog entries
 - TopicAssignment: Data structure for tracking document-topic assignments
-- TopicCatalog: Manager for topic persistence
+- TopicCatalog: Manager for topic persistence using document-based storage (Option B)
 - TopicChangeResult: Unified result for all topic operations
-- TopicChangeDetector: Hybrid pipeline for topic operations (create/reuse/merge/split)
+- TopicChangeDetector: Hybrid pipeline for topic operations (create/reuse/merge/split/rename)
+
+Key design decisions:
+- Topics are stored as lifelong_summary documents with facet='topics' and key=<name>
+- Hybrid novelty detection: embedding similarity prefilter + optional LLM judge
+- All topic operations (create/reuse/merge/split/rename) use unified data structures
 """
 
 from __future__ import annotations
@@ -13,9 +18,11 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+
+from prompts import topic_change_instruction
 
 
 @dataclass
@@ -129,17 +136,29 @@ class TopicChangeResult:
     """Unified result for topic change operations.
     
     Supports all topic operations: create, reuse, merge, split, rename.
+    
+    Attributes:
+        decision: The operation type - one of:
+            - "reuse": Content fits an existing topic (high similarity)
+            - "create": Content represents a new topic (low similarity)
+            - "merge": Content bridges multiple topics; merge them into one
+            - "split": Content represents a distinct subtopic; create new topic
+            - "rename": Content redefines a topic's focus; suggest new name
+        topic_name: Primary topic name (target for reuse/merge, new name for create/split/rename)
+        rationale: Human-readable explanation of the decision
+        similarity_scores: Similarity scores for all candidate topics
+        top_candidates: Top-k candidates sorted by similarity (name, score) tuples
+        merge_from: Source topic being merged (only for merge operation)
+        split_into: New topic created from split (only for split operation)
+        rename_from: Old topic name being renamed (only for rename operation)
     """
-    decision: str  # "reuse", "create", "merge", "split", "rename"
-    topic_name: str  # Primary topic name (target for reuse/merge, new name for create/split)
-    rationale: str  # Human-readable explanation
+    decision: str
+    topic_name: str
+    rationale: str
     similarity_scores: Dict[str, float] = field(default_factory=dict)
     top_candidates: List[Tuple[str, float]] = field(default_factory=list)
-    # Merge-specific: topic being merged into topic_name
     merge_from: Optional[str] = None
-    # Split-specific: new topic created from splitting topic_name
     split_into: Optional[str] = None
-    # Rename-specific: old name being renamed to topic_name
     rename_from: Optional[str] = None
 
 
@@ -153,6 +172,10 @@ class TopicCatalog:
     Uses document-based persistence (Option B from design):
     - Topics are stored as lifelong_summary documents with facet='topics'
     - Topic assignments are embedded in the topic summary payload
+    
+    The catalog provides methods to:
+    - List, get, save, and archive topics
+    - Compute topic embeddings for similarity-based matching
     """
     
     def __init__(self, store, embedder=None):
@@ -164,8 +187,6 @@ class TopicCatalog:
         """
         self.store = store
         self.embedder = embedder
-        self._cache: Dict[str, TopicEntry] = {}
-        self._cache_valid = False
     
     def list_topics(self, status: Optional[str] = None) -> List[TopicEntry]:
         """List all topics, optionally filtered by status."""
@@ -286,7 +307,6 @@ class TopicCatalog:
         result = self.store.add_document_chunked(content=content, document_meta=document_meta)
         if result:
             topic.document_id = result.get("document_id")
-            self._cache[topic.name] = topic
         
         return result
     
@@ -465,8 +485,6 @@ class TopicChangeDetector:
     ) -> TopicChangeResult:
         """Use LLM to make decision for complex topic operations."""
         try:
-            from prompts import topic_change_instruction
-            
             # Build prompt context
             candidates_text = "\n".join(
                 f"- {name} (similarity: {score:.3f})"
