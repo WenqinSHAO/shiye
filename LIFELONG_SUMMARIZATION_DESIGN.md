@@ -398,8 +398,6 @@ facet: timeline
   └── key: "topics:AI"         → payload: {...}
 ```
 
-**Backward compatibility:** Storage layer supports both `key` (new) and `topic` (legacy) tag names.
-
 ### Improvement 2: LLM API KV Cache Optimization ✅ (Implemented)
 
 **Problem:** Original instruction-first prompts prevented LLM API KV cache hits.

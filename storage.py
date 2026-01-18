@@ -1736,9 +1736,7 @@ class LocalStore:
             tags = json.loads(row["tags"]) if row["tags"] else {}
             if facet and tags.get("facet") != facet:
                 continue
-            # Support both 'key' (new) and 'topic' (legacy) tag names
-            row_key = tags.get("key") or tags.get("topic")
-            if key and row_key != key:
+            if key and tags.get("key") != key:
                 continue
             summaries.append(
                 {
