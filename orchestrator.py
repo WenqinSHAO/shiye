@@ -253,8 +253,7 @@ class Orchestrator:
             facet: Top-level category ("profile", "topics", "timeline")
             key: Sub-identifier within facet (e.g., "interests", "AI")
         """
-        if facet in {"profile", "timeline"} and not key:
-            key = None  # Whole-facet summary
+        # For profile and timeline facets, key is not used in bootstrap (whole-facet summary)
         if manual and not facet and not key:
             latest_summary = self.workspace.get_latest_lifelong_summary()
             if not latest_summary:
