@@ -38,7 +38,7 @@ class SummaryPlanner:
         time_windows: List[Tuple[datetime, datetime]] = []
         batch_start = since
         while batch_start < now:
-            batch_end = batch_start.replace(tzinfo=UTC) + timedelta(days=self.batch_days)
+            batch_end = batch_start + timedelta(days=self.batch_days)
             time_windows.append((batch_start, batch_end))
             batch_start = batch_end
         

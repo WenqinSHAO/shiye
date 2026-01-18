@@ -286,9 +286,6 @@ class TestSummaryPlanner:
         assert len(requests) == 9
 
         # Verify ordering: all facets for window 1 come before window 2
-        # Extract (window_start, facet) pairs
-        window_facet_pairs = [(r.since, r.facet) for r in requests]
-
         # First 3 requests should all be from the first time window
         first_window = requests[0].since
         for i in range(3):
