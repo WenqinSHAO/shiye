@@ -2031,7 +2031,6 @@ def chat(payload=Body(...)) -> dict:
     try:
         def parse_summary_args(raw: str) -> dict:
             facet = None
-            topic = None
             facets = None
             since = None
             batch_days = None
@@ -2041,8 +2040,6 @@ def chat(payload=Body(...)) -> dict:
                 key, value = part.split(":", 1)
                 if key == "facet":
                     facet = value
-                elif key == "topic":
-                    topic = value
                 elif key == "facets":
                     facets = [item.strip() for item in value.split(",") if item.strip()]
                 elif key == "since":
@@ -2054,7 +2051,6 @@ def chat(payload=Body(...)) -> dict:
                         batch_days = None
             return {
                 "facet": facet,
-                "topic": topic,
                 "facets": facets,
                 "since": since,
                 "batch_days": batch_days,
