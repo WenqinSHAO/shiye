@@ -349,6 +349,17 @@ class TestPrompts:
 
         assert "chronological" in instruction.lower() or "timeline" in instruction.lower()
 
+    def test_timeline_summary_instruction_structure(self):
+        from prompts import timeline_summary_instruction
+
+        instruction = timeline_summary_instruction(is_delta=False)
+
+        assert "facets.timeline" in instruction
+        assert "date" in instruction
+        assert "event" in instruction
+        assert "sources" in instruction
+        assert "confidence" in instruction
+
     def test_rss_summary_instruction_includes_keywords(self):
         from prompts import rss_summary_instruction
 
