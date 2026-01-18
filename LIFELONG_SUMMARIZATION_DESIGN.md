@@ -182,12 +182,11 @@ request planning, prompt structure, and test coverage.
 ### Phase 4+5 additional: Debug tools for summarization (Complete)
 
 #### Debug tools deliverables
-- `/sum debug` command to display last summary debug trace.
 - `orchestrator.last_summary_trace` tracks debug info during summarization.
-- Debug output includes:
+- Debug output (via global debug toggle) includes:
   - Documents included in summary (chunk IDs, doc types, content previews).
   - Affinity matrix calculation context.
   - LLM API call contexts (instruction, input lengths).
   - LLM API responses (parsed payloads, errors).
   - Summary result metadata.
-- HTML-formatted debug panels for web UI display.
+- Debug info displayed when global debug toggle is enabled in web UI.
