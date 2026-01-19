@@ -1,6 +1,7 @@
 from typing import List
 from pathlib import Path
 import secrets
+import html
 
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile, Request
 from fastapi.responses import HTMLResponse
@@ -247,6 +248,19 @@ def index() -> HTMLResponse:
             .score-chart .legend { margin-top: 8px; display: flex; gap: 10px; flex-wrap: wrap; font-size: 11px; color: var(--subtle); }
             .legend .swatch { display: inline-flex; align-items: center; gap: 6px; }
             .legend .dot { width: 10px; height: 10px; border-radius: 999px; display: inline-block; }
+            
+            /* Summary and Reference Styles (Phase 4 & 5) */
+            .summary-view { padding: 12px; }
+            .summary-view h3 { margin: 0 0 8px 0; color: var(--ink); }
+            .summary-refs { display: flex; flex-direction: column; gap: 8px; }
+            .ref-peek-btn { font-size: 11px; padding: 4px 8px; margin-top: 6px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent-soft); color: var(--accent); cursor: pointer; }
+            .ref-peek-btn:hover { background: var(--accent); color: white; }
+            .ref-preview-modal { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 200; display: flex; align-items: center; justify-content: center; }
+            .ref-preview-content { background: var(--panel); border-radius: 12px; max-width: 800px; width: 90%; max-height: 80vh; overflow: auto; box-shadow: 0 16px 48px rgba(0,0,0,0.2); }
+            .ref-preview-header { padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+            .ref-preview-body { padding: 16px; overflow: auto; max-height: 60vh; }
+            .ref-preview-close { font-size: 18px; cursor: pointer; color: var(--subtle); border: none; background: none; padding: 4px 8px; }
+            .ref-preview-close:hover { color: var(--ink); }
         </style>
     </head>
     <body>
@@ -1904,6 +1918,116 @@ def index() -> HTMLResponse:
                     sendChat();
                 }
             });
+            
+            // Phase 5: Reference peek functionality
+            async function peekReference(docId, chunkId) {
+                // Create modal if it doesn't exist
+                let modal = document.getElementById('ref-preview-modal');
+                if (!modal) {
+                    modal = document.createElement('div');
+                    modal.id = 'ref-preview-modal';
+                    modal.className = 'ref-preview-modal';
+                    modal.style.display = 'none';
+                    modal.innerHTML = `
+                        <div class="ref-preview-content">
+                            <div class="ref-preview-header">
+                                <span id="ref-preview-title">Reference Preview</span>
+                                <button class="ref-preview-close" onclick="closeRefPreview()">×</button>
+                            </div>
+                            <div class="ref-preview-body" id="ref-preview-body">
+                                <div class="hit-doc-loading">Loading...</div>
+                            </div>
+                        </div>
+                    `;
+                    document.body.appendChild(modal);
+                    modal.addEventListener('click', (e) => {
+                        if (e.target === modal) closeRefPreview();
+                    });
+                }
+                
+                const titleEl = document.getElementById('ref-preview-title');
+                const bodyEl = document.getElementById('ref-preview-body');
+                
+                // Show modal with loading state
+                modal.style.display = 'flex';
+                bodyEl.innerHTML = '<div class="hit-doc-loading">Loading reference...</div>';
+                titleEl.textContent = chunkId ? `Chunk #${chunkId}` : `Document #${docId}`;
+                
+                try {
+                    let data;
+                    if (chunkId) {
+                        // Fetch chunk with context
+                        data = await fetchJson(`/api/chunks/${chunkId}?context=true`);
+                        const chunk = data.chunk || {};
+                        
+                        const docInfo = chunk.document || {};
+                        titleEl.textContent = `${docInfo.title || 'Document'} • Chunk #${chunkId}`;
+                        
+                        let html = '';
+                        if (chunk.heading_path) {
+                            html += `<div class="note-subtle">Section: ${chunk.heading_path}</div>`;
+                        }
+                        
+                        // Show chunk text with context
+                        html += '<div class="hit-doc-content">';
+                        if (chunk.chunk_window) {
+                            html += `<div class="hit-text">${marked.parse(chunk.chunk_window)}</div>`;
+                        } else if (chunk.text) {
+                            html += `<div class="hit-text">${marked.parse(chunk.text)}</div>`;
+                        }
+                        html += '</div>';
+                        
+                        // Document info
+                        if (docInfo.doc_type || docInfo.source) {
+                            html += '<div style="margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border);">';
+                            html += `<div class="note-subtle">Type: ${escapeHtml(docInfo.doc_type || 'unknown')}</div>`;
+                            if (docInfo.uri || docInfo.source) {
+                                const source = docInfo.uri || docInfo.source;
+                                html += `<div class="note-subtle">Source: <a href="${encodeURI(source)}" target="_blank">${escapeHtml(source)}</a></div>`;
+                            }
+                            html += '</div>';
+                        }
+                        
+                        bodyEl.innerHTML = html;
+                        typesetMath(bodyEl);
+                    } else if (docId) {
+                        // Fetch full document
+                        data = await fetchJson(`/api/documents/${docId}`);
+                        const doc = data.document || {};
+                        
+                        titleEl.textContent = doc.title || `Document #${docId}`;
+                        
+                        let html = '';
+                        html += `<div class="note-subtle">Type: ${escapeHtml(doc.doc_type || 'unknown')}</div>`;
+                        if (doc.uri || doc.source) {
+                            const source = doc.uri || doc.source;
+                            html += `<div class="note-subtle">Source: <a href="${encodeURI(source)}" target="_blank">${escapeHtml(source)}</a></div>`;
+                        }
+                        html += `<div class="note-subtle">Created: ${escapeHtml(doc.created_at || 'unknown')}</div>`;
+                        
+                        // Show content with chunk highlighting if available
+                        const content = doc.content || '';
+                        const chunks = doc.chunks || [];
+                        
+                        if (chunks.length > 0) {
+                            html += buildHighlightedDocument(content, chunks, [], null);
+                        } else if (content) {
+                            html += '<div class="hit-doc-content">' + marked.parse(content) + '</div>';
+                        }
+                        
+                        bodyEl.innerHTML = html;
+                        typesetMath(bodyEl);
+                    }
+                } catch (e) {
+                    console.warn('Reference preview failed', e);
+                    bodyEl.innerHTML = `<div class="hit-doc-loading" style="color: #dc2626;">Failed to load reference: ${e.message || 'Unknown error'}</div>`;
+                }
+            }
+            
+            function closeRefPreview() {
+                const modal = document.getElementById('ref-preview-modal');
+                if (modal) modal.style.display = 'none';
+            }
         </script>
     </body>
     </html>
@@ -2016,6 +2140,162 @@ def get_document(doc_id: int) -> dict:
     return {"document": doc}
 
 
+@app.get("/api/chunks/{chunk_id}")
+def get_chunk(chunk_id: int, context: bool = False) -> dict:
+    """Get a chunk by ID with optional surrounding context."""
+    if not workspace.store:
+        raise HTTPException(status_code=500, detail="Store not available")
+    try:
+        from reference_resolver import ReferenceResolver
+        resolver = ReferenceResolver(store=workspace.store)
+        
+        if context:
+            result = resolver.get_chunk_context(chunk_id)
+            if "error" in result:
+                raise HTTPException(status_code=404, detail=result["error"])
+            return {"chunk": result}
+        
+        resolved = resolver.resolve_chunk(chunk_id, include_full_text=True)
+        if not resolved.preview.resolved:
+            raise HTTPException(status_code=404, detail=resolved.preview.error or "Chunk not found")
+        
+        from reference_resolver import resolved_to_dict
+        return {"chunk": resolved_to_dict(resolved)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/references/resolve")
+def resolve_references(payload=Body(...)) -> dict:
+    """Resolve one or more references from a summary payload."""
+    if not workspace.store:
+        raise HTTPException(status_code=500, detail="Store not available")
+    
+    references = (payload or {}).get("references", [])
+    include_full_text = bool((payload or {}).get("include_full_text"))
+    
+    if not references:
+        return {"results": []}
+    
+    try:
+        from reference_resolver import ReferenceResolver, resolved_to_dict
+        resolver = ReferenceResolver(store=workspace.store)
+        results = resolver.resolve_references(references, include_full_text)
+        return {"results": [resolved_to_dict(r) for r in results]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/summaries/{summary_id}")
+def get_summary(summary_id: int, resolve_refs: bool = False) -> dict:
+    """Get a summary document with optional reference resolution."""
+    if not workspace.store:
+        raise HTTPException(status_code=500, detail="Store not available")
+    
+    try:
+        doc = workspace.get_document(summary_id)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Summary not found")
+        
+        # Check if it's a lifelong summary
+        if doc.get("doc_type") != "lifelong_summary":
+            raise HTTPException(status_code=400, detail="Document is not a lifelong summary")
+        
+        result = {"summary": doc}
+        
+        if resolve_refs:
+            # Parse the JSON payload from the content
+            import json as json_module
+            import re
+            content = doc.get("content") or ""
+            json_match = re.search(r"```json\s*\n(.*?)\n```", content, re.DOTALL)
+            if json_match:
+                try:
+                    payload = json_module.loads(json_match.group(1))
+                    from reference_resolver import ReferenceResolver, resolved_to_dict
+                    resolver = ReferenceResolver(store=workspace.store)
+                    refs = resolver.resolve_summary_references(payload, include_full_text=False)
+                    result["resolved_references"] = [resolved_to_dict(r) for r in refs]
+                except Exception as e:
+                    result["reference_error"] = str(e)
+        
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/summaries/{summary_id}/debug")
+def get_summary_debug(summary_id: int) -> dict:
+    """Get debug information for a summary, including documents and LLM context."""
+    if not workspace.store:
+        raise HTTPException(status_code=500, detail="Store not available")
+    
+    try:
+        doc = workspace.get_document(summary_id)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Summary not found")
+        
+        if doc.get("doc_type") != "lifelong_summary":
+            raise HTTPException(status_code=400, detail="Document is not a lifelong summary")
+        
+        import json as json_module
+        import re
+        
+        content = doc.get("content") or ""
+        json_match = re.search(r"```json\s*\n(.*?)\n```", content, re.DOTALL)
+        
+        debug_info = {
+            "summary_id": summary_id,
+            "title": doc.get("title"),
+            "doc_type": doc.get("doc_type"),
+            "created_at": doc.get("created_at"),
+            "event_at": doc.get("event_at"),
+            "tags": doc.get("tags"),
+        }
+        
+        if json_match:
+            try:
+                payload = json_module.loads(json_match.group(1))
+                debug_info["payload"] = payload
+                debug_info["facet"] = payload.get("facet")
+                debug_info["key"] = payload.get("key")
+                debug_info["trigger"] = payload.get("trigger")
+                debug_info["prompt_version"] = payload.get("prompt_version")
+                
+                # Resolve references to show included documents
+                references = payload.get("references") or []
+                debug_info["reference_count"] = len(references)
+                
+                if references:
+                    from reference_resolver import ReferenceResolver, resolved_to_dict
+                    resolver = ReferenceResolver(store=workspace.store)
+                    resolved = resolver.resolve_references(references, include_full_text=False)
+                    debug_info["resolved_references"] = [resolved_to_dict(r) for r in resolved]
+                
+                # Include bootstrap info if present
+                bootstrap_info = payload.get("bootstrap")
+                if bootstrap_info:
+                    debug_info["bootstrap"] = bootstrap_info
+                
+                # Include affinity matrix if present
+                affinity = payload.get("affinity_matrix")
+                if affinity:
+                    debug_info["affinity_matrix"] = affinity
+                    
+            except Exception as e:
+                debug_info["payload_error"] = str(e)
+        
+        return {"debug": debug_info}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.delete("/api/messages/{chunk_id}")
 def delete_message(chunk_id: int) -> dict:
     ok = workspace.delete_chunk(chunk_id)
@@ -2063,10 +2343,152 @@ def chat(payload=Body(...)) -> dict:
         if text.strip().startswith("/list"):
             args = text.strip().removeprefix("/list").strip()
             parsed = parse_summary_args(args)
+            
+            # Check for /list <id> to view a specific summary with references
+            id_match = None
+            for part in args.split():
+                if part.isdigit():
+                    id_match = int(part)
+                    break
+            
+            if id_match:
+                # View specific summary with resolved references
+                try:
+                    doc = workspace.get_document(id_match)
+                    if not doc:
+                        return {"messages": [make_system_msg(f"[list] Summary #{id_match} not found.")]}
+                    
+                    if doc.get("doc_type") != "lifelong_summary":
+                        return {"messages": [make_system_msg(f"[list] Document #{id_match} is not a summary.")]}
+                    
+                    # Parse payload from content
+                    import json as json_module
+                    import re
+                    content = doc.get("content") or ""
+                    json_match = re.search(r"```json\s*\n(.*?)\n```", content, re.DOTALL)
+                    
+                    parts = [f"<div class='summary-view'>"]
+                    parts.append(f"<h3>Summary #{id_match}: {doc.get('title') or 'Untitled'}</h3>")
+                    parts.append(f"<div class='note-subtle'>Created: {doc.get('created_at') or 'unknown'}</div>")
+                    
+                    if json_match:
+                        try:
+                            payload = json_module.loads(json_match.group(1))
+                            
+                            # Show facet info
+                            facet = payload.get("facet") or "all"
+                            key = payload.get("key") or ""
+                            parts.append(f"<div class='note-subtle'>Facet: {facet}{' • Key: ' + key if key else ''}</div>")
+                            
+                            # Show facet contents
+                            facets = payload.get("facets") or {}
+                            
+                            # Profile items
+                            profile = facets.get("profile") or []
+                            if profile:
+                                parts.append("<div class='debug-section'><div class='debug-section-title'>Profile</div>")
+                                for item in profile:
+                                    if isinstance(item, str):
+                                        parts.append(f"<div class='debug-item'>• {item}</div>")
+                                    elif isinstance(item, dict):
+                                        parts.append(f"<div class='debug-item'>• {item.get('text') or item.get('summary') or str(item)}</div>")
+                                parts.append("</div>")
+                            
+                            # Topics
+                            topics = facets.get("topics") or []
+                            if topics:
+                                parts.append("<div class='debug-section'><div class='debug-section-title'>Topics</div>")
+                                for item in topics:
+                                    if isinstance(item, dict):
+                                        parts.append(f"<div class='debug-item'><strong>{item.get('name') or 'Topic'}</strong>: {item.get('summary') or ''}</div>")
+                                    else:
+                                        parts.append(f"<div class='debug-item'>• {item}</div>")
+                                parts.append("</div>")
+                            
+                            # Timeline
+                            timeline = facets.get("timeline") or []
+                            if timeline:
+                                parts.append("<div class='debug-section'><div class='debug-section-title'>Timeline</div>")
+                                for item in timeline:
+                                    if isinstance(item, dict):
+                                        date = item.get("date") or ""
+                                        event = item.get("event") or ""
+                                        parts.append(f"<div class='debug-item'><strong>{date}</strong>: {event}</div>")
+                                    else:
+                                        parts.append(f"<div class='debug-item'>• {item}</div>")
+                                parts.append("</div>")
+                            
+                            # References with resolution
+                            references = payload.get("references") or []
+                            if references:
+                                parts.append(f"<div class='debug-section'><div class='debug-section-title'>References ({len(references)})</div>")
+                                parts.append("<div class='summary-refs'>")
+                                
+                                if workspace.store:
+                                    from reference_resolver import ReferenceResolver
+                                    resolver = ReferenceResolver(store=workspace.store)
+                                    resolved = resolver.resolve_references(references[:20], include_full_text=False)
+                                    
+                                    for ref_result in resolved:
+                                        preview = ref_result.preview
+                                        if preview.resolved:
+                                            ref_type = "chunk" if preview.chunk_id else "document"
+                                            ref_id = preview.chunk_id or preview.document_id
+                                            title = html.escape(preview.title or "Untitled")
+                                            doc_type = html.escape(preview.doc_type or "unknown")
+                                            snippet_text = preview.snippet[:100] + "..." if len(preview.snippet) > 100 else preview.snippet
+                                            snippet = html.escape(snippet_text)
+                                            
+                                            parts.append(f"""
+                                            <div class='search-hit' style='margin-bottom: 8px; padding: 8px;' 
+                                                 data-ref-type='{html.escape(ref_type)}' data-ref-id='{ref_id}'
+                                                 data-doc-id='{preview.document_id or ""}'>
+                                                <div class='hit-header'>
+                                                    <span class='hit-type'>{doc_type}</span>
+                                                    <span class='hit-date'>{html.escape(ref_type)} #{ref_id}</span>
+                                                </div>
+                                                <div class='hit-title'>{title}</div>
+                                                <div class='hit-text' style='font-size: 12px;'>{snippet}</div>
+                                                <button class='hit-toggle-btn ref-peek-btn' 
+                                                        onclick='peekReference({int(preview.document_id or 0)}, {int(preview.chunk_id or 0)})'
+                                                        type='button'>View source</button>
+                                            </div>
+                                            """)
+                                        else:
+                                            raw_ref = ref_result.raw_reference
+                                            error = html.escape(preview.error or "Not found")
+                                            parts.append(f"<div class='debug-item' style='color: #999;'>⚠ Ref {html.escape(str(raw_ref))}: {error}</div>")
+                                    
+                                    if len(references) > 20:
+                                        parts.append(f"<div class='debug-item'>... and {len(references) - 20} more references</div>")
+                                else:
+                                    for ref in references[:10]:
+                                        parts.append(f"<div class='debug-item'>{ref}</div>")
+                                
+                                parts.append("</div></div>")
+                            
+                        except Exception as e:
+                            parts.append(f"<div class='debug-item' style='color: #dc2626;'>Error parsing payload: {e}</div>")
+                    
+                    # Show raw markdown section
+                    markdown_start = content.find("```\n")
+                    if markdown_start > 0:
+                        markdown_content = content[markdown_start + 4:].strip()
+                        if markdown_content:
+                            parts.append("<div class='debug-section'><div class='debug-section-title'>Markdown</div>")
+                            parts.append(f"<div class='hit-doc-content' style='max-height: 200px;'>{markdown_content}</div>")
+                            parts.append("</div>")
+                    
+                    parts.append("</div>")
+                    return {"messages": [make_system_msg("".join(parts))]}
+                    
+                except Exception as e:
+                    return {"messages": [make_system_msg(f"[list] Error viewing summary #{id_match}: {e}")]}
+            
             summaries = workspace.list_lifelong_summaries(limit=10, **parsed)
             if not summaries:
                 return {"messages": [make_system_msg("[list] No summaries found.")]}
-            lines = ["[list] Latest summaries:", ""]
+            lines = ["[list] Latest summaries:", "", "Click on an ID to view details: `/list <id>`", ""]
             for item in summaries:
                 timestamp = item.get("event_at") or item.get("created_at") or "unknown"
                 title = item.get("title") or "Summary"
@@ -2074,7 +2496,7 @@ def chat(payload=Body(...)) -> dict:
                 facet_label = tags.get("facet") or ""
                 key_label = tags.get("key") or ""
                 label = " • ".join(p for p in [title, facet_label, key_label, timestamp] if p)
-                lines.append(f"- #{item['id']} • {label}")
+                lines.append(f"- **#{item['id']}** • {label}")
             return {"messages": [make_system_msg("\n".join(lines))]}
 
         if text.strip().startswith("/sum"):
@@ -2097,9 +2519,15 @@ def chat(payload=Body(...)) -> dict:
                     facets=parsed.get("facets"),
                 )
                 return {"messages": [make_system_msg(summary_msg.content)]}
+            
             parsed = parse_summary_args(args)
-            summary_msg = orchestrator.summarize_lifelong(manual=True, **parsed)
-            return {"messages": [make_system_msg(summary_msg.content)]}
+            summary_msg = orchestrator.summarize_lifelong(manual=True, debug=debug, **parsed)
+            
+            # Include debug trace in response if debug mode
+            response_msg = make_system_msg(summary_msg.content)
+            if debug and orchestrator.last_summary_trace:
+                response_msg["debug"] = orchestrator.last_summary_trace
+            return {"messages": [response_msg]}
         
         # Handle /find command for semantic search
         if text.strip().startswith("/find"):
